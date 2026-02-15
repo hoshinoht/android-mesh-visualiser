@@ -59,7 +59,7 @@ dependencies {
     implementation("androidx.compose.runtime:runtime-livedata")
 
     // ARCore
-    implementation("com.google.ar:core:1.45.0")
+    implementation("com.google.ar:core:1.52.0")
 
     // SceneView for AR rendering (Compose compatible)
     implementation("io.github.sceneview:arsceneview:2.3.0")
