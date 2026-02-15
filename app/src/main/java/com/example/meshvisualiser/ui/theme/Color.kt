@@ -2,25 +2,63 @@ package com.example.meshvisualiser.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Primary colors
-val Primary = Color(0xFF6200EE)
-val PrimaryVariant = Color(0xFF3700B3)
-val Secondary = Color(0xFF03DAC6)
-val SecondaryVariant = Color(0xFF018786)
+// Material 3 seed-based palette (dark teal/cyan theme)
+// Primary: Light Blue 300
+val md_theme_light_primary = Color(0xFF006783)
+val md_theme_light_onPrimary = Color(0xFFFFFFFF)
+val md_theme_light_primaryContainer = Color(0xFFBCE9FF)
+val md_theme_light_onPrimaryContainer = Color(0xFF001F2A)
+val md_theme_light_secondary = Color(0xFF00696E)
+val md_theme_light_onSecondary = Color(0xFFFFFFFF)
+val md_theme_light_secondaryContainer = Color(0xFF6FF6FC)
+val md_theme_light_onSecondaryContainer = Color(0xFF002021)
+val md_theme_light_tertiary = Color(0xFF7B4E7F)
+val md_theme_light_onTertiary = Color(0xFFFFFFFF)
+val md_theme_light_tertiaryContainer = Color(0xFFFFD6FF)
+val md_theme_light_onTertiaryContainer = Color(0xFF310937)
+val md_theme_light_error = Color(0xFFBA1A1A)
+val md_theme_light_onError = Color(0xFFFFFFFF)
+val md_theme_light_errorContainer = Color(0xFFFFDAD6)
+val md_theme_light_onErrorContainer = Color(0xFF410002)
+val md_theme_light_background = Color(0xFFF6FEFF)
+val md_theme_light_onBackground = Color(0xFF001F24)
+val md_theme_light_surface = Color(0xFFF6FEFF)
+val md_theme_light_onSurface = Color(0xFF001F24)
+val md_theme_light_surfaceVariant = Color(0xFFDCE4E8)
+val md_theme_light_onSurfaceVariant = Color(0xFF40484C)
+val md_theme_light_outline = Color(0xFF70787C)
+val md_theme_light_inverseSurface = Color(0xFF00363D)
+val md_theme_light_inverseOnSurface = Color(0xFFD0F8FF)
+val md_theme_light_inversePrimary = Color(0xFF63D4FF)
 
-// Background and surface
-val Background = Color(0xFF121212)
-val Surface = Color(0xFF1E1E1E)
-val Error = Color(0xFFCF6679)
+val md_theme_dark_primary = Color(0xFF63D4FF)
+val md_theme_dark_onPrimary = Color(0xFF003546)
+val md_theme_dark_primaryContainer = Color(0xFF004D64)
+val md_theme_dark_onPrimaryContainer = Color(0xFFBCE9FF)
+val md_theme_dark_secondary = Color(0xFF4CD9DF)
+val md_theme_dark_onSecondary = Color(0xFF003739)
+val md_theme_dark_secondaryContainer = Color(0xFF004F53)
+val md_theme_dark_onSecondaryContainer = Color(0xFF6FF6FC)
+val md_theme_dark_tertiary = Color(0xFFEBB5ED)
+val md_theme_dark_onTertiary = Color(0xFF49204E)
+val md_theme_dark_tertiaryContainer = Color(0xFF623766)
+val md_theme_dark_onTertiaryContainer = Color(0xFFFFD6FF)
+val md_theme_dark_error = Color(0xFFFFB4AB)
+val md_theme_dark_onError = Color(0xFF690005)
+val md_theme_dark_errorContainer = Color(0xFF93000A)
+val md_theme_dark_onErrorContainer = Color(0xFFFFDAD6)
+val md_theme_dark_background = Color(0xFF001F24)
+val md_theme_dark_onBackground = Color(0xFF97F0FF)
+val md_theme_dark_surface = Color(0xFF001F24)
+val md_theme_dark_onSurface = Color(0xFF97F0FF)
+val md_theme_dark_surfaceVariant = Color(0xFF40484C)
+val md_theme_dark_onSurfaceVariant = Color(0xFFC0C8CC)
+val md_theme_dark_outline = Color(0xFF8A9296)
+val md_theme_dark_inverseSurface = Color(0xFF97F0FF)
+val md_theme_dark_inverseOnSurface = Color(0xFF00363D)
+val md_theme_dark_inversePrimary = Color(0xFF006783)
 
-// On colors
-val OnPrimary = Color.White
-val OnSecondary = Color.Black
-val OnBackground = Color.White
-val OnSurface = Color.White
-val OnError = Color.Black
-
-// Status colors
+// Domain-specific status colors (functional, not themeable)
 val StatusDiscovering = Color(0xFFFFA726)
 val StatusElecting = Color(0xFF42A5F5)
 val StatusResolving = Color(0xFFAB47BC)
@@ -30,6 +68,3 @@ val StatusLeader = Color(0xFFFFD54F)
 // AR visualization colors
 val ArLineColor = Color(0xFF00E5FF)
 val ArPeerNode = Color(0xFFFF4081)
-
-// Overlay
-val OverlayBackground = Color(0x99000000)

@@ -128,6 +128,8 @@ class NearbyConnectionsManager(
           Log.d(TAG, "Handshake received from $endpointId, peerId: ${message.senderId}")
           currentPeers + (endpointId to peer)
         }
+        // Forward handshake to MeshManager so leader can re-send COORDINATOR to late joiners
+        onMessageReceived(endpointId, message)
       }
       else -> {
         // Forward other messages to callback

@@ -1,6 +1,7 @@
 package com.example.meshvisualiser.ar
 
 import android.util.Log
+import com.example.meshvisualiser.models.PoseData
 import com.google.ar.core.Anchor
 import com.google.ar.core.Pose
 
@@ -11,60 +12,66 @@ import com.google.ar.core.Pose
  * across all devices.
  */
 class PoseManager {
-  companion object {
-    private const val TAG = "PoseManager"
-  }
+    companion object {
+        private const val TAG = "PoseManager"
+    }
 
-  private var sharedAnchor: Anchor? = null
+    private var sharedAnchor: Anchor? = null
 
-  /** Set the shared anchor for relative pose calculations. */
-  fun setSharedAnchor(anchor: Anchor) {
-    this.sharedAnchor = anchor
-    Log.d(TAG, "Shared anchor set")
-  }
+    /** Set the shared anchor for relative pose calculations. */
+    fun setSharedAnchor(anchor: Anchor) {
+        this.sharedAnchor = anchor
+        Log.d(TAG, "Shared anchor set")
+    }
 
-  /**
-   * Calculate camera pose relative to the shared anchor.
-   *
-   * @param cameraPose The camera's world pose
-   * @return Relative pose (x, y, z) or null if no shared anchor
-   */
-  fun calculateRelativePose(cameraPose: Pose): Triple<Float, Float, Float>? {
-    val anchor = sharedAnchor ?: return null
+    /**
+     * Calculate camera pose relative to the shared anchor, including rotation.
+     *
+     * @param cameraPose The camera's world pose
+     * @return PoseData with position and rotation, or null if no shared anchor
+     */
+    fun calculateRelativePose(cameraPose: Pose): PoseData? {
+        val anchor = sharedAnchor ?: return null
 
-    // Get pose relative to anchor
-    val anchorPose = anchor.pose
-    val relativePose = anchorPose.inverse().compose(cameraPose)
+        val anchorPose = anchor.pose
+        val relativePose = anchorPose.inverse().compose(cameraPose)
+        val q = relativePose.rotationQuaternion // [x, y, z, w]
 
-    return Triple(relativePose.tx(), relativePose.ty(), relativePose.tz())
-  }
+        return PoseData(
+            x = relativePose.tx(),
+            y = relativePose.ty(),
+            z = relativePose.tz(),
+            qx = q[0],
+            qy = q[1],
+            qz = q[2],
+            qw = q[3]
+        )
+    }
 
-  /**
-   * Convert a relative pose back to world coordinates.
-   *
-   * @param relativeX Relative X coordinate
-   * @param relativeY Relative Y coordinate
-   * @param relativeZ Relative Z coordinate
-   * @return World pose or null if no shared anchor
-   */
-  fun relativeToWorldPose(relativeX: Float, relativeY: Float, relativeZ: Float): Pose? {
-    val anchor = sharedAnchor ?: return null
+    /**
+     * Convert a relative PoseData back to world coordinates.
+     *
+     * @param poseData The relative pose data
+     * @return World pose or null if no shared anchor
+     */
+    fun relativeToWorldPose(poseData: PoseData): Pose? {
+        val anchor = sharedAnchor ?: return null
 
-    // Create relative pose
-    val relativePose = Pose.makeTranslation(relativeX, relativeY, relativeZ)
+        val translation = floatArrayOf(poseData.x, poseData.y, poseData.z)
+        val rotation = floatArrayOf(poseData.qx, poseData.qy, poseData.qz, poseData.qw)
+        val relativePose = Pose(translation, rotation)
 
-    // Transform to world coordinates
-    return anchor.pose.compose(relativePose)
-  }
+        return anchor.pose.compose(relativePose)
+    }
 
-  /** Get the shared anchor's pose. */
-  fun getAnchorPose(): Pose? = sharedAnchor?.pose
+    /** Get the shared anchor's pose. */
+    fun getAnchorPose(): Pose? = sharedAnchor?.pose
 
-  /** Check if we have a valid shared anchor. */
-  fun hasSharedAnchor(): Boolean = sharedAnchor != null
+    /** Check if we have a valid shared anchor. */
+    fun hasSharedAnchor(): Boolean = sharedAnchor != null
 
-  /** Cleanup resources. */
-  fun cleanup() {
-    sharedAnchor = null
-  }
+    /** Cleanup resources. */
+    fun cleanup() {
+        sharedAnchor = null
+    }
 }
