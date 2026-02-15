@@ -136,8 +136,6 @@ fun ARSceneViewComposable(viewModel: MainViewModel, onAnchorPlaced: () -> Unit) 
               // Set up frame update listener
               onFrame = { frameTime ->
                 session?.let { session ->
-                  viewModel.setArSession(session)
-
                   val frame = session.update()
                   val camera = frame.camera
 
@@ -158,10 +156,10 @@ fun ARSceneViewComposable(viewModel: MainViewModel, onAnchorPlaced: () -> Unit) 
               // Handle taps using onTouchEvent - SceneView provides its own HitResult
               onTouchEvent = { motionEvent: MotionEvent, hitResult: SceneViewHitResult? ->
                 if (motionEvent.action == MotionEvent.ACTION_UP) {
-                  // Perform ARCore hit test directly using session
+                  // Use the latest frame from the session (avoid calling session.update() twice per frame)
                   session?.let { arSession ->
-                    val frame = arSession.update()
-                    val hits = frame.hitTest(motionEvent.x, motionEvent.y)
+                    val frame = arSession.currentFrame
+                    val hits = frame?.hitTest(motionEvent.x, motionEvent.y) ?: emptyList()
 
                     // Find first plane hit
                     val planeHit =

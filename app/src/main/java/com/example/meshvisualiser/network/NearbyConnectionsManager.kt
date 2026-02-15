@@ -10,6 +10,7 @@ import com.google.android.gms.nearby.connection.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 /**
  * Manages Nearby Connections for P2P mesh networking. Uses P2P_CLUSTER strategy for many-to-many
@@ -54,7 +55,7 @@ class NearbyConnectionsManager(
                   Log.d(TAG, "Connected to $endpointId")
                   // Add peer and send handshake
                   val peerInfo = PeerInfo(endpointId = endpointId)
-                  _peers.value = _peers.value + (endpointId to peerInfo)
+                  _peers.update { it + (endpointId to peerInfo) }
 
                   // Send handshake with our ID
                   sendMessage(endpointId, MeshMessage.handshake(localId))
@@ -70,7 +71,7 @@ class NearbyConnectionsManager(
 
             override fun onDisconnected(endpointId: String) {
               Log.d(TAG, "Disconnected from $endpointId")
-              _peers.value = _peers.value - endpointId
+              _peers.update { it - endpointId }
             }
           }
 
@@ -120,13 +121,12 @@ class NearbyConnectionsManager(
   private fun handleMessage(endpointId: String, message: MeshMessage) {
     when (message.getMessageType()) {
       com.example.meshvisualiser.models.MessageType.HANDSHAKE -> {
-        // Update peer's ID from handshake
-        val currentPeers = _peers.value.toMutableMap()
-        currentPeers[endpointId]?.let { peer ->
+        // Update peer's ID from handshake (create PeerInfo if it doesn't exist yet due to race)
+        _peers.update { currentPeers ->
+          val peer = currentPeers[endpointId] ?: PeerInfo(endpointId = endpointId)
           peer.peerId = message.senderId
-          currentPeers[endpointId] = peer
-          _peers.value = currentPeers
           Log.d(TAG, "Handshake received from $endpointId, peerId: ${message.senderId}")
+          currentPeers + (endpointId to peer)
         }
       }
       else -> {

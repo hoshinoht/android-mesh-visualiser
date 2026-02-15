@@ -4,7 +4,6 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.meshvisualiser.MeshVisualizerApp
 import com.example.meshvisualiser.ar.CloudAnchorManager
 import com.example.meshvisualiser.ar.LineRenderer
 import com.example.meshvisualiser.ar.PoseManager
@@ -18,12 +17,9 @@ import com.google.ar.core.Session
 import io.github.sceneview.math.Position
 import io.github.sceneview.node.Node
 import kotlin.random.Random
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -67,8 +63,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val _peerPoses = MutableStateFlow<Map<Long, Triple<Float, Float, Float>>>(emptyMap())
   val peerPoses: StateFlow<Map<Long, Triple<Float, Float, Float>>> = _peerPoses.asStateFlow()
 
-  // Jobs
-  private var poseBroadcastJob: Job? = null
   private var anchorToHost: Anchor? = null
 
   private var isInitialized = false
@@ -157,7 +151,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       if (anchor != null) {
         poseManager.setSharedAnchor(anchor)
         meshManager.setConnected()
-        startPoseBroadcast()
         _statusMessage.value = "Connected!"
       } else {
         _statusMessage.value = "Failed to resolve anchor"
@@ -190,26 +183,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       val cloudAnchorId = cloudAnchorManager.hostCloudAnchor(anchor)
 
       if (cloudAnchorId != null) {
-        poseManager.setSharedAnchor(cloudAnchorManager.getSharedAnchor()!!)
+        val anchor = cloudAnchorManager.getSharedAnchor() ?: run {
+          _statusMessage.value = "Failed to get shared anchor"
+          return@launch
+        }
+        poseManager.setSharedAnchor(anchor)
         meshManager.announceLeadership(cloudAnchorId)
-        startPoseBroadcast()
+        meshManager.setConnected()
         _statusMessage.value = "Connected as leader!"
       } else {
         _statusMessage.value = "Failed to host anchor"
       }
     }
-  }
-
-  /** Start broadcasting poses at ~30fps. */
-  private fun startPoseBroadcast() {
-    poseBroadcastJob?.cancel()
-    poseBroadcastJob =
-            viewModelScope.launch {
-              while (isActive) {
-                // Pose is broadcast in updateFrame()
-                delay(MeshVisualizerApp.POSE_BROADCAST_INTERVAL_MS)
-              }
-            }
   }
 
   /** Called every AR frame to update pose and visualizations. */
@@ -256,7 +241,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   override fun onCleared() {
     super.onCleared()
-    poseBroadcastJob?.cancel()
 
     if (isInitialized) {
       nearbyManager.cleanup()

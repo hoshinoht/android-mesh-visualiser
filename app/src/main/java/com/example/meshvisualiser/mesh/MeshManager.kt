@@ -83,7 +83,10 @@ class MeshManager(
     _meshState.value = MeshState.ELECTING
     isWaitingForOk = true
 
-    // Cancel any existing timeout
+    // Cancel mesh formation timeout so it doesn't re-trigger election
+    meshFormationTimeoutRunnable?.let { handler.removeCallbacks(it) }
+
+    // Cancel any existing election timeout
     electionTimeoutRunnable?.let { handler.removeCallbacks(it) }
 
     // Find peers with higher IDs

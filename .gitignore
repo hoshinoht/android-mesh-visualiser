@@ -91,3 +91,8 @@ temp/
 
 # Test outputs
 test-results/
+
+
+# claude
+/.claude
+CLAUDE.md
