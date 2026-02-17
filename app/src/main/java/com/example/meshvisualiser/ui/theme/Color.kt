@@ -65,6 +65,30 @@ val StatusResolving = Color(0xFFAB47BC)
 val StatusConnected = Color(0xFF66BB6A)
 val StatusLeader = Color(0xFFFFD54F)
 
+// Data exchange log colors
+val LogTcp = Color(0xFF42A5F5)      // Blue
+val LogUdp = Color(0xFFFFA726)      // Orange
+val LogAck = Color(0xFF66BB6A)      // Green
+val LogError = Color(0xFFEF5350)    // Red
+
 // AR visualization colors
 val ArLineColor = Color(0xFF00E5FF)
 val ArPeerNode = Color(0xFFFF4081)
+
+// Packet visualization
+val PacketTcp = Color(0xFF42A5F5)
+val PacketUdp = Color(0xFFFFA726)
+val PacketAck = Color(0xFF66BB6A)
+val PacketDrop = Color(0xFFEF5350)
+
+// CSMA/CD states
+val CsmaIdle = Color(0xFF78909C)
+val CsmaSensing = Color(0xFFFFCA28)
+val CsmaTransmitting = Color(0xFF66BB6A)
+val CsmaCollision = Color(0xFFEF5350)
+val CsmaBackoff = Color(0xFFAB47BC)
+
+// Topology quality
+val TopologyExcellent = Color(0xFF66BB6A)
+val TopologyGood = Color(0xFFFFCA28)
+val TopologyPoor = Color(0xFFEF5350)

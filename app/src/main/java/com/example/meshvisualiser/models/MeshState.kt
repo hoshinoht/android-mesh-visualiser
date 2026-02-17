@@ -6,13 +6,10 @@ package com.example.meshvisualiser.models
 enum class MeshState {
     /** Initial state - discovering nearby devices */
     DISCOVERING,
-    
+
     /** Running the Bully Algorithm to elect a leader */
     ELECTING,
-    
-    /** Leader hosting or followers resolving Cloud Anchor */
-    RESOLVING,
-    
-    /** Fully connected with shared spatial reference */
+
+    /** Fully connected — local anchor placed, exchanging poses */
     CONNECTED
 }

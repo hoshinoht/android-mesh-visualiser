@@ -1,12 +1,12 @@
 package com.example.meshvisualiser.ar
 
 import android.util.Log
+import com.example.meshvisualiser.simulation.CsmaState
 import dev.romainguy.kotlin.math.Quaternion as MathQuaternion
 import io.github.sceneview.math.Position
 import io.github.sceneview.node.CylinderNode
 import io.github.sceneview.node.Node
 import io.github.sceneview.node.SphereNode
-import kotlin.math.abs
 import kotlin.math.sqrt
 
 /**
@@ -18,12 +18,14 @@ class LineRenderer {
         private const val TAG = "LineRenderer"
         private const val LINE_RADIUS = 0.005f // 5mm thick line
         private const val PEER_SPHERE_RADIUS = 0.03f // 3cm sphere for peer position
+        private const val BUS_RADIUS = 0.008f // 8mm thick bus line
     }
 
     // Map of peerId to their visual nodes
     private val peerNodes = mutableMapOf<Long, PeerVisualization>()
 
     private var parentNode: Node? = null
+    private var busNode: CylinderNode? = null
 
     private data class PeerVisualization(
         val sphereNode: SphereNode?,
@@ -93,7 +95,53 @@ class LineRenderer {
         }
     }
 
-    private fun createLineNode(parent: Node, start: Position, end: Position): CylinderNode? {
+    /**
+     * Update CSMA/CD bus visualization — a horizontal line connecting all peers.
+     * Called when CSMA/CD mode is active to show the shared medium.
+     */
+    fun updateBusVisualization(peerPositions: List<Position>, mediumBusy: Boolean) {
+        val parent = parentNode ?: return
+
+        if (peerPositions.size < 2) {
+            removeBus()
+            return
+        }
+
+        // Remove old bus
+        busNode?.let {
+            parent.removeChildNode(it)
+            it.destroy()
+        }
+
+        // Find leftmost and rightmost positions (by X axis) to draw a bus line
+        val sorted = peerPositions.sortedBy { it.x }
+        val start = sorted.first()
+        val end = sorted.last()
+
+        busNode = try {
+            createLineNode(parent, start, end, BUS_RADIUS)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create bus node", e)
+            null
+        }
+    }
+
+    /** Remove the CSMA/CD bus visualization. */
+    fun removeBus() {
+        val parent = parentNode
+        busNode?.let {
+            parent?.removeChildNode(it)
+            it.destroy()
+        }
+        busNode = null
+    }
+
+    private fun createLineNode(
+        parent: Node,
+        start: Position,
+        end: Position,
+        radius: Float = LINE_RADIUS
+    ): CylinderNode? {
         val dx = end.x - start.x
         val dy = end.y - start.y
         val dz = end.z - start.z
@@ -111,7 +159,7 @@ class LineRenderer {
 
         return CylinderNode(
             engine = parent.engine,
-            radius = LINE_RADIUS,
+            radius = radius,
             height = length,
             center = Position(midX, midY, midZ)
         ).apply {
@@ -122,7 +170,7 @@ class LineRenderer {
 
     /**
      * Compute a quaternion that rotates the Y-axis (0,1,0) to the given direction.
-     * Uses the half-vector method: q = normalize(cross + (1 + dot), where cross = Y × dir).
+     * Uses the half-vector method: q = normalize(cross + (1 + dot), where cross = Y x dir).
      */
     private fun yAxisRotationTo(dx: Float, dy: Float, dz: Float, length: Float): MathQuaternion {
         // Normalize direction
@@ -136,10 +184,10 @@ class LineRenderer {
         // Nearly aligned with Y — identity quaternion
         if (dot > 0.9999f) return MathQuaternion(0f, 0f, 0f, 1f)
 
-        // Nearly opposite to Y — 180° rotation around any perpendicular axis (use Z)
+        // Nearly opposite to Y — 180 rotation around any perpendicular axis (use Z)
         if (dot < -0.9999f) return MathQuaternion(0f, 0f, 1f, 0f)
 
-        // cross(Y, dir) = (1*nz - 0*ny, 0*nx - 0*nz, 0*ny - 1*nx) = (nz, 0, -nx)
+        // cross(Y, dir) = (nz, 0, -nx)
         val cx = nz
         val cy = 0f
         val cz = -nx
@@ -180,6 +228,7 @@ class LineRenderer {
             }
         }
         peerNodes.clear()
+        removeBus()
         parentNode = null
         Log.d(TAG, "Cleaned up all visualizations")
     }

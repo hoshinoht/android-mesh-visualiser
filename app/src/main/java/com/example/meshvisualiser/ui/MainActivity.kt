@@ -2,32 +2,53 @@ package com.example.meshvisualiser.ui
 
 import android.os.Bundle
 import android.util.Log
-import android.view.MotionEvent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.meshvisualiser.models.MeshState
+import com.example.meshvisualiser.models.PeerInfo
+import com.example.meshvisualiser.models.TransmissionMode
+import com.example.meshvisualiser.simulation.CsmaState
+import com.example.meshvisualiser.simulation.CsmacdState
+import com.example.meshvisualiser.ui.components.*
 import com.example.meshvisualiser.ui.theme.*
 import com.google.ar.core.Config
-import com.google.ar.core.Frame
 import com.google.ar.core.Plane
+import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import io.github.sceneview.ar.ARSceneView
-import io.github.sceneview.collision.HitResult as SceneViewHitResult
 import io.github.sceneview.math.Position
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -76,46 +97,136 @@ fun MainScreen(viewModel: MainViewModel) {
     val isLeader by viewModel.isLeader.collectAsStateWithLifecycle()
     val currentLeaderId by viewModel.currentLeaderId.collectAsStateWithLifecycle()
     val statusMessage by viewModel.statusMessage.collectAsStateWithLifecycle()
-    val mappingQuality by viewModel.mappingQuality.collectAsStateWithLifecycle()
+    val dataLogs by viewModel.dataLogs.collectAsStateWithLifecycle()
+    val selectedPeerId by viewModel.selectedPeerId.collectAsStateWithLifecycle()
+    val peerRttHistory by viewModel.peerRttHistory.collectAsStateWithLifecycle()
+    val transmissionMode by viewModel.transmissionMode.collectAsStateWithLifecycle()
+    val csmaState by viewModel.csmaState.collectAsStateWithLifecycle()
+    val quizState by viewModel.quizState.collectAsStateWithLifecycle()
 
-    var hasPlacedAnchor by remember { mutableStateOf(false) }
+    var showGraph by remember { mutableStateOf(false) }
+    // 0 = Topology, 1 = Connections
+    var graphTab by remember { mutableIntStateOf(0) }
 
     Box(modifier = Modifier.fillMaxSize()) {
         // AR Scene
-        ARSceneViewComposable(viewModel = viewModel, onAnchorPlaced = { hasPlacedAnchor = true })
+        ARSceneViewComposable(viewModel = viewModel)
 
-        // Status Overlay (top)
-        StatusOverlay(
-            localId = viewModel.localId,
-            meshState = meshState,
-            peerCount = peers.size,
-            isLeader = isLeader,
-            currentLeaderId = currentLeaderId,
-            statusMessage = statusMessage
-        )
+        // Top: Status + Peer List
+        Column(modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter)) {
+            StatusOverlay(
+                localId = viewModel.localId,
+                meshState = meshState,
+                peerCount = peers.size,
+                isLeader = isLeader,
+                currentLeaderId = currentLeaderId,
+                statusMessage = statusMessage,
+                isConnected = meshState == MeshState.CONNECTED,
+                onToggleTopology = { showGraph = !showGraph },
+                onStartQuiz = { viewModel.startQuiz() }
+            )
 
-        // Instructions (center)
-        if (meshState == MeshState.RESOLVING && isLeader && !hasPlacedAnchor) {
-            InstructionOverlay(
-                message = "Tap to place anchor",
-                modifier = Modifier.align(Alignment.Center)
+            if (peers.isNotEmpty()) {
+                PeerListPanel(
+                    peers = peers,
+                    selectedPeerId = selectedPeerId,
+                    onSelectPeer = { viewModel.selectPeer(it) }
+                )
+            }
+
+            // Graph panel (collapsible) — Topology or Connections
+            AnimatedVisibility(visible = showGraph && peers.isNotEmpty()) {
+                GlassSurface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Column(modifier = Modifier.padding(8.dp)) {
+                        // Tab row to switch between views
+                        TabRow(
+                            selectedTabIndex = graphTab,
+                            containerColor = Color.Transparent,
+                            contentColor = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Tab(
+                                selected = graphTab == 0,
+                                onClick = { graphTab = 0 },
+                                text = {
+                                    Text("Topology", style = MaterialTheme.typography.labelSmall)
+                                }
+                            )
+                            Tab(
+                                selected = graphTab == 1,
+                                onClick = { graphTab = 1 },
+                                text = {
+                                    Text("Connections", style = MaterialTheme.typography.labelSmall)
+                                }
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        if (graphTab == 0) {
+                            TopologyView(
+                                localId = viewModel.localId,
+                                peers = peers,
+                                leaderId = currentLeaderId,
+                                peerRttHistory = peerRttHistory
+                            )
+                        } else {
+                            ConnectionGraphView(
+                                localId = viewModel.localId,
+                                peers = peers,
+                                dataLogs = dataLogs
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // CSMA/CD overlay (above data exchange panel)
+        if (transmissionMode == TransmissionMode.CSMA_CD &&
+            csmaState.currentState != CsmaState.IDLE) {
+            CsmacdOverlay(
+                csmaState = csmaState,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 260.dp)
             )
         }
 
-        // Mapping Quality (bottom) - shown when hosting
-        if (meshState == MeshState.RESOLVING && isLeader && hasPlacedAnchor) {
-            MappingQualityOverlay(
-                quality = mappingQuality,
-                modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp)
+        // Bottom: Data Exchange Panel
+        if (peers.isNotEmpty()) {
+            DataExchangePanel(
+                dataLogs = dataLogs,
+                selectedPeerId = selectedPeerId,
+                peers = peers,
+                transmissionMode = transmissionMode,
+                onModeChanged = { viewModel.setTransmissionMode(it) },
+                onSendTcp = { viewModel.sendTcpData() },
+                onSendUdp = { viewModel.sendUdpData() },
+                modifier = Modifier.align(Alignment.BottomCenter)
+            )
+        }
+
+        // Quiz overlay (fullscreen modal)
+        if (quizState.isActive) {
+            QuizOverlay(
+                quizState = quizState,
+                onAnswer = { viewModel.answerQuiz(it) },
+                onNext = { viewModel.nextQuestion() },
+                onClose = { viewModel.closeQuiz() }
             )
         }
     }
 }
 
 @Composable
-fun ARSceneViewComposable(viewModel: MainViewModel, onAnchorPlaced: () -> Unit) {
+fun ARSceneViewComposable(viewModel: MainViewModel) {
     var arSceneView: ARSceneView? by remember { mutableStateOf(null) }
-    var latestFrame: Frame? by remember { mutableStateOf(null) }
 
     DisposableEffect(Unit) { onDispose { arSceneView?.destroy() } }
 
@@ -124,18 +235,13 @@ fun ARSceneViewComposable(viewModel: MainViewModel, onAnchorPlaced: () -> Unit) 
             ARSceneView(ctx).apply {
                 arSceneView = this
 
-                // Configure Cloud Anchors
                 configureSession { session, config ->
-                    config.cloudAnchorMode = Config.CloudAnchorMode.ENABLED
                     config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
                     config.lightEstimationMode = Config.LightEstimationMode.ENVIRONMENTAL_HDR
                 }
 
-                // Set up frame update listener
                 onFrame = { frameTime ->
-                    session?.let { session ->
-                        val frame = session.update()
-                        latestFrame = frame
+                    this@apply.frame?.let { frame ->
                         val camera = frame.camera
 
                         if (camera.trackingState == TrackingState.TRACKING) {
@@ -143,40 +249,16 @@ fun ARSceneViewComposable(viewModel: MainViewModel, onAnchorPlaced: () -> Unit) 
                             val cameraPosition =
                                 Position(cameraPose.tx(), cameraPose.ty(), cameraPose.tz())
 
-                            // Update frame in view model
                             viewModel.updateFrame(cameraPose, cameraPosition)
 
-                            // Estimate mapping quality from tracking
-                            val quality = estimateMappingQuality(frame)
+                            val quality = this@apply.session?.let {
+                                estimateMappingQuality(it)
+                            } ?: 0
                             viewModel.updateMappingQuality(quality)
                         }
                     }
                 }
 
-                // Handle taps using onTouchEvent
-                onTouchEvent = { motionEvent: MotionEvent, hitResult: SceneViewHitResult? ->
-                    if (motionEvent.action == MotionEvent.ACTION_UP) {
-                        latestFrame?.let { frame ->
-                            val hits = frame.hitTest(motionEvent.x, motionEvent.y)
-
-                            val planeHit = hits.firstOrNull { hit ->
-                                val trackable = hit.trackable
-                                trackable is Plane &&
-                                    trackable.trackingState == TrackingState.TRACKING
-                            }
-
-                            planeHit?.let { hit ->
-                                val anchor = hit.createAnchor()
-                                viewModel.setAnchorToHost(anchor)
-                                onAnchorPlaced()
-                                Log.d("ARSceneView", "Anchor placed via ARCore hit test")
-                            }
-                        }
-                    }
-                    true
-                }
-
-                // Start mesh when scene is ready
                 onSessionCreated = { session ->
                     viewModel.setArSession(session)
                     viewModel.startMesh()
@@ -187,9 +269,9 @@ fun ARSceneViewComposable(viewModel: MainViewModel, onAnchorPlaced: () -> Unit) 
     )
 }
 
-private fun estimateMappingQuality(frame: Frame): Int {
-    val planes = frame.getUpdatedTrackables(Plane::class.java)
-    val trackingPlanes = planes.count { it.trackingState == TrackingState.TRACKING }
+private fun estimateMappingQuality(session: Session): Int {
+    val trackingPlanes = session.getAllTrackables(Plane::class.java)
+        .count { it.trackingState == TrackingState.TRACKING }
     return minOf(trackingPlanes * 20, 100)
 }
 
@@ -200,13 +282,27 @@ fun StatusOverlay(
     peerCount: Int,
     isLeader: Boolean,
     currentLeaderId: Long,
-    statusMessage: String
+    statusMessage: String,
+    isConnected: Boolean = false,
+    onToggleTopology: () -> Unit = {},
+    onStartQuiz: () -> Unit = {}
 ) {
-    Surface(
+    val stateColor by animateColorAsState(
+        targetValue = when (meshState) {
+            MeshState.DISCOVERING -> StatusDiscovering
+            MeshState.ELECTING -> StatusElecting
+            MeshState.CONNECTED -> StatusConnected
+        },
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessLow
+        ),
+        label = "statusColor"
+    )
+
+    GlassSurface(
         modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
-        tonalElevation = 3.dp,
-        shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp)
+        shape = MaterialTheme.shapes.medium
     ) {
         Column(
             modifier = Modifier
@@ -223,14 +319,6 @@ fun StatusOverlay(
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            // State with color
-            val stateColor = when (meshState) {
-                MeshState.DISCOVERING -> StatusDiscovering
-                MeshState.ELECTING -> StatusElecting
-                MeshState.RESOLVING -> StatusResolving
-                MeshState.CONNECTED -> StatusConnected
-            }
-
             Text(
                 text = statusMessage,
                 style = MaterialTheme.typography.labelLarge,
@@ -239,7 +327,7 @@ fun StatusOverlay(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Peer count and leader status in a row
+            // Chip row
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -284,56 +372,250 @@ fun StatusOverlay(
                         )
                     )
                 }
+
+                if (isConnected) {
+                    AssistChip(
+                        onClick = onToggleTopology,
+                        label = {
+                            Text(
+                                text = "Topology",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    )
+                    AssistChip(
+                        onClick = onStartQuiz,
+                        label = {
+                            Text(
+                                text = "Quiz",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-fun InstructionOverlay(message: String, modifier: Modifier = Modifier) {
-    ElevatedCard(
-        modifier = modifier,
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
-        )
+fun PeerListPanel(
+    peers: Map<String, PeerInfo>,
+    selectedPeerId: Long?,
+    onSelectPeer: (Long?) -> Unit
+) {
+    var expanded by remember { mutableStateOf(true) }
+    val validPeers = peers.values.filter { it.hasValidPeerId }
+
+    GlassSurface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+        shape = MaterialTheme.shapes.small
     ) {
-        Text(
-            text = message,
-            modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
-            style = MaterialTheme.typography.headlineSmall,
-            color = MaterialTheme.colorScheme.onSurface
-        )
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Peers (${validPeers.size})",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Icon(
+                    imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            AnimatedVisibility(visible = expanded) {
+                Column(modifier = Modifier.padding(top = 4.dp)) {
+                    validPeers.forEach { peer ->
+                        val isSelected = peer.peerId == selectedPeerId
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp)
+                                .clickable {
+                                    onSelectPeer(if (isSelected) null else peer.peerId)
+                                },
+                            color = if (isSelected)
+                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                            else Color.Transparent,
+                            shape = MaterialTheme.shapes.extraSmall
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                // Connection status dot
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(StatusConnected)
+                                )
+                                // Peer ID (short)
+                                Text(
+                                    text = peer.peerId.toString().takeLast(6),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                // Device model
+                                Text(
+                                    text = peer.deviceModel.ifEmpty { "Unknown" },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (isSelected) {
+                                    Text(
+                                        text = "TARGET",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
 @Composable
-fun MappingQualityOverlay(quality: Int, modifier: Modifier = Modifier) {
-    Surface(
+fun DataExchangePanel(
+    dataLogs: List<DataLogEntry>,
+    selectedPeerId: Long?,
+    peers: Map<String, PeerInfo>,
+    transmissionMode: TransmissionMode,
+    onModeChanged: (TransmissionMode) -> Unit,
+    onSendTcp: () -> Unit,
+    onSendUdp: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val listState = rememberLazyListState()
+    val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+
+    // Auto-scroll to bottom when new logs arrive
+    LaunchedEffect(dataLogs.size) {
+        if (dataLogs.isNotEmpty()) {
+            listState.animateScrollToItem(dataLogs.lastIndex)
+        }
+    }
+
+    GlassSurface(
         modifier = modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
-        tonalElevation = 3.dp,
-        shape = RoundedCornerShape(16.dp)
+        shape = MaterialTheme.shapes.medium
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = "Mapping Quality: $quality%",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface
+        Column(modifier = Modifier.padding(12.dp)) {
+            // Mode toggle
+            ModeSegmentedButton(
+                selectedMode = transmissionMode,
+                onModeSelected = onModeChanged,
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            // Send buttons
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Data Exchange",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f)
+                )
+                FilledTonalButton(
+                    onClick = onSendTcp,
+                    enabled = selectedPeerId != null,
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = LogTcp.copy(alpha = 0.2f)
+                    ),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                ) {
+                    Text("Send TCP", color = LogTcp, style = MaterialTheme.typography.labelSmall)
+                }
+                FilledTonalButton(
+                    onClick = onSendUdp,
+                    enabled = selectedPeerId != null,
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = LogUdp.copy(alpha = 0.2f)
+                    ),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                ) {
+                    Text("Send UDP", color = LogUdp, style = MaterialTheme.typography.labelSmall)
+                }
+            }
 
-            LinearProgressIndicator(
-                progress = { quality / 100f },
-                modifier = Modifier.fillMaxWidth().height(8.dp),
-                color = when {
-                    quality < 30 -> Color.Red
-                    quality < 70 -> Color.Yellow
-                    else -> StatusConnected
-                },
-                trackColor = MaterialTheme.colorScheme.surfaceVariant
-            )
+            if (selectedPeerId == null) {
+                Text(
+                    text = "Select a peer above to send data",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Log area
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 180.dp)
+                    .clip(MaterialTheme.shapes.extraSmall)
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                    .padding(4.dp)
+            ) {
+                if (dataLogs.isEmpty()) {
+                    item {
+                        Text(
+                            text = "No data exchanged yet",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+                }
+                items(dataLogs) { entry ->
+                    val arrow = if (entry.direction == "OUT") "\u2192" else "\u2190"
+                    val color = when (entry.protocol) {
+                        "TCP" -> LogTcp
+                        "UDP" -> LogUdp
+                        "ACK" -> LogAck
+                        "DROP", "RETRY" -> LogError
+                        else -> MaterialTheme.colorScheme.onSurface
+                    }
+                    val seqStr = entry.seqNum?.let { " #$it" } ?: ""
+                    val rttStr = entry.rttMs?.let { " [${it}ms]" } ?: ""
+                    val modelStr = entry.peerModel.ifEmpty {
+                        entry.peerId.toString().takeLast(6)
+                    }
+
+                    Text(
+                        text = "[${timeFormat.format(Date(entry.timestamp))}] " +
+                            "$arrow ${entry.protocol}$seqStr " +
+                            "${if (entry.direction == "OUT") "to" else "from"} $modelStr " +
+                            "(${entry.sizeBytes}B) ${entry.payload}$rttStr",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace
+                        ),
+                        color = color,
+                        modifier = Modifier.padding(vertical = 1.dp)
+                    )
+                }
+            }
         }
     }
 }
+

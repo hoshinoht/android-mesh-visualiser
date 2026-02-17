@@ -1,9 +1,11 @@
 package com.example.meshvisualiser.network
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import com.example.meshvisualiser.MeshVisualizerApp
 import com.example.meshvisualiser.models.MeshMessage
+import com.example.meshvisualiser.models.MessageType
 import com.example.meshvisualiser.models.PeerInfo
 import com.google.android.gms.nearby.Nearby
 import com.google.android.gms.nearby.connection.*
@@ -57,8 +59,9 @@ class NearbyConnectionsManager(
                   val peerInfo = PeerInfo(endpointId = endpointId)
                   _peers.update { it + (endpointId to peerInfo) }
 
-                  // Send handshake with our ID
+                  // Send handshake with our ID, then device info
                   sendMessage(endpointId, MeshMessage.handshake(localId))
+                  sendMessage(endpointId, MeshMessage.deviceInfo(localId, Build.MODEL))
                 }
                 ConnectionsStatusCodes.STATUS_CONNECTION_REJECTED -> {
                   Log.d(TAG, "Connection rejected by $endpointId")
@@ -100,7 +103,15 @@ class NearbyConnectionsManager(
           object : EndpointDiscoveryCallback() {
             override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
               Log.d(TAG, "Endpoint found: $endpointId (${info.endpointName})")
-              // Request connection to discovered endpoint
+
+              // Both devices discover each other simultaneously. To avoid duplicate
+              // connections, only the device with the higher localId initiates.
+              val remoteId = info.endpointName.toLongOrNull()
+              if (remoteId != null && localId < remoteId) {
+                Log.d(TAG, "Skipping connection request — remote $remoteId will initiate")
+                return
+              }
+
               connectionsClient
                       .requestConnection(
                               localId.toString(),
@@ -120,7 +131,18 @@ class NearbyConnectionsManager(
 
   private fun handleMessage(endpointId: String, message: MeshMessage) {
     when (message.getMessageType()) {
-      com.example.meshvisualiser.models.MessageType.HANDSHAKE -> {
+      MessageType.HANDSHAKE -> {
+        // Check for duplicate: another endpoint already has this peerId
+        val existingEntry = _peers.value.entries.find {
+          it.key != endpointId && it.value.peerId == message.senderId
+        }
+        if (existingEntry != null) {
+          Log.w(TAG, "Duplicate peer ${message.senderId} on $endpointId (already on ${existingEntry.key}), disconnecting duplicate")
+          connectionsClient.disconnectFromEndpoint(endpointId)
+          _peers.update { it - endpointId }
+          return
+        }
+
         // Update peer's ID from handshake (create PeerInfo if it doesn't exist yet due to race)
         _peers.update { currentPeers ->
           val peer = currentPeers[endpointId] ?: PeerInfo(endpointId = endpointId)
@@ -131,8 +153,17 @@ class NearbyConnectionsManager(
         // Forward handshake to MeshManager so leader can re-send COORDINATOR to late joiners
         onMessageReceived(endpointId, message)
       }
+      MessageType.DEVICE_INFO -> {
+        // Update peer's device model
+        _peers.update { currentPeers ->
+          val peer = currentPeers[endpointId] ?: PeerInfo(endpointId = endpointId)
+          peer.deviceModel = message.data
+          Log.d(TAG, "Device info from $endpointId: ${message.data}")
+          currentPeers + (endpointId to peer)
+        }
+      }
       else -> {
-        // Forward other messages to callback
+        // Forward other messages (including DATA_TCP, DATA_UDP) to callback
         onMessageReceived(endpointId, message)
       }
     }

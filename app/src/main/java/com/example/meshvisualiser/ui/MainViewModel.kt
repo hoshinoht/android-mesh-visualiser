@@ -4,25 +4,48 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.meshvisualiser.ar.CloudAnchorManager
 import com.example.meshvisualiser.ar.LineRenderer
+import com.example.meshvisualiser.ar.PacketRenderer
+import com.example.meshvisualiser.ar.PacketType
 import com.example.meshvisualiser.ar.PoseManager
 import com.example.meshvisualiser.mesh.MeshManager
+import com.example.meshvisualiser.models.MeshMessage
 import com.example.meshvisualiser.models.MeshState
+import com.example.meshvisualiser.models.MessageType
 import com.example.meshvisualiser.models.PeerInfo
 import com.example.meshvisualiser.models.PoseData
+import com.example.meshvisualiser.models.TransmissionMode
 import com.example.meshvisualiser.network.NearbyConnectionsManager
+import com.example.meshvisualiser.quiz.QuizEngine
+import com.example.meshvisualiser.quiz.QuizState
+import com.example.meshvisualiser.simulation.CsmacdSimulator
+import com.example.meshvisualiser.simulation.CsmacdState
 import com.google.ar.core.Anchor
 import com.google.ar.core.Pose
 import com.google.ar.core.Session
 import io.github.sceneview.math.Position
 import io.github.sceneview.node.Node
 import kotlin.random.Random
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
+/** Log entry for simulated TCP/UDP data exchange. */
+data class DataLogEntry(
+    val timestamp: Long,
+    val direction: String,   // "OUT" or "IN"
+    val protocol: String,    // "TCP", "UDP", "ACK", "DROP", "RETRY"
+    val peerId: Long,
+    val peerModel: String,
+    val payload: String,
+    val sizeBytes: Int,
+    val seqNum: Int? = null,
+    val rttMs: Long? = null
+)
 
 /**
  * ViewModel for the main AR mesh visualization screen. Coordinates all managers and handles the
@@ -31,10 +54,12 @@ import kotlinx.coroutines.launch
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "MainViewModel"
-        private const val ANCHOR_PLACEMENT_TIMEOUT_MS = 30_000L
-        private const val RESOLVE_MAX_RETRIES = 5
-        private const val RESOLVE_INITIAL_DELAY_MS = 2_000L
         private const val POSE_BROADCAST_MIN_INTERVAL_MS = 100L // 10 Hz max
+        private const val TCP_ACK_TIMEOUT_MS = 1_000L
+        private const val TCP_MAX_RETRIES = 3
+        private const val UDP_DROP_PROBABILITY = 0.10
+        private const val MAX_LOG_ENTRIES = 100
+        private const val RTT_HISTORY_SIZE = 20
     }
 
     // Generate unique local ID
@@ -43,9 +68,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Managers
     private lateinit var nearbyManager: NearbyConnectionsManager
     private lateinit var meshManager: MeshManager
-    val cloudAnchorManager = CloudAnchorManager()
     val poseManager = PoseManager()
     val lineRenderer = LineRenderer()
+    val packetRenderer = PacketRenderer()
+
+    // AR session for local anchor
+    private var arSession: Session? = null
+    private var localAnchor: Anchor? = null
 
     // State flows
     private val _meshState = MutableStateFlow(MeshState.DISCOVERING)
@@ -69,10 +98,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _peerPoses = MutableStateFlow<Map<Long, PoseData>>(emptyMap())
     val peerPoses: StateFlow<Map<Long, PoseData>> = _peerPoses.asStateFlow()
 
-    private var anchorToHost: Anchor? = null
+    // Data exchange
+    private val _dataLogs = MutableStateFlow<List<DataLogEntry>>(emptyList())
+    val dataLogs: StateFlow<List<DataLogEntry>> = _dataLogs.asStateFlow()
+
+    private val _selectedPeerId = MutableStateFlow<Long?>(null)
+    val selectedPeerId: StateFlow<Long?> = _selectedPeerId.asStateFlow()
+
+    private var tcpSeqNum = 0
+    private val pendingAcks = mutableMapOf<Int, Job>()
+
+    // RTT tracking
+    private val pendingSendTimestamps = mutableMapOf<Int, Long>() // seqNum → sendTimeMs
+    private val _peerRttHistory = MutableStateFlow<Map<Long, List<Long>>>(emptyMap())
+    val peerRttHistory: StateFlow<Map<Long, List<Long>>> = _peerRttHistory.asStateFlow()
+
+    // Transmission mode (Direct vs CSMA/CD)
+    private val _transmissionMode = MutableStateFlow(TransmissionMode.DIRECT)
+    val transmissionMode: StateFlow<TransmissionMode> = _transmissionMode.asStateFlow()
+
+    // CSMA/CD state
+    private val _csmaState = MutableStateFlow(CsmacdState())
+    val csmaState: StateFlow<CsmacdState> = _csmaState.asStateFlow()
+
+    private val csmaSimulator = CsmacdSimulator { newState ->
+        _csmaState.value = newState
+    }
+
+    // Quiz
+    private val quizEngine = QuizEngine()
+    private val _quizState = MutableStateFlow(QuizState())
+    val quizState: StateFlow<QuizState> = _quizState.asStateFlow()
+    private var quizTimerJob: Job? = null
+
+    // Packet viz
+    private var lastMyWorldPosition: Position? = null
+
     private var isInitialized = false
 
-    // Pose broadcast throttling (#8)
+    // Pose broadcast throttling
     private var lastPoseBroadcastMs = 0L
 
     /** Initialize all managers. Call after permissions are granted. */
@@ -86,7 +150,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 context = getApplication(),
                 localId = localId,
                 onMessageReceived = { endpointId, message ->
-                    meshManager.onMessageReceived(endpointId, message)
+                    when (message.getMessageType()) {
+                        MessageType.DATA_TCP, MessageType.DATA_UDP ->
+                            onDataReceived(endpointId, message)
+                        else ->
+                            meshManager.onMessageReceived(endpointId, message)
+                    }
                 }
             )
 
@@ -121,9 +190,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         isInitialized = true
     }
 
-    /** Set the ARCore session. */
+    /** Set the ARCore session for local anchor placement. */
     fun setArSession(session: Session) {
-        cloudAnchorManager.setSession(session)
+        this.arSession = session
     }
 
     /** Start the mesh formation process. */
@@ -137,59 +206,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         meshManager.startMeshFormation()
     }
 
-    /** Called when this device becomes the leader. (#1: starts anchor placement timeout) */
+    /** Called when this device becomes the leader. */
     private fun onBecomeLeader() {
         Log.d(TAG, "We are now the leader!")
         _isLeader.value = true
-        _statusMessage.value = "Leader! Tap to place anchor..."
-
-        // If anchor was already placed before election completed, host immediately
-        anchorToHost?.let { anchor ->
-            hostCloudAnchor(anchor)
-            return
-        }
-
-        // #1: Start a timeout — if the leader hasn't placed an anchor, remind them
-        viewModelScope.launch {
-            delay(ANCHOR_PLACEMENT_TIMEOUT_MS)
-            if (_meshState.value == MeshState.RESOLVING && anchorToHost == null) {
-                _statusMessage.value = "Please tap a surface to place the anchor!"
-                Log.w(TAG, "Anchor placement timeout — still waiting for leader to tap")
-            }
-        }
+        _statusMessage.value = "Connected as leader!"
+        tryPlaceLocalAnchor()
     }
 
-    /** Called when a new leader is elected (and we're not it). (#2: retry resolve with backoff) */
-    private fun onNewLeader(leaderId: Long, cloudAnchorId: String) {
-        Log.d(TAG, "New leader: $leaderId, anchor: $cloudAnchorId")
+    /** Called when a new leader is elected (and we're not it). */
+    private fun onNewLeader(leaderId: Long) {
+        Log.d(TAG, "New leader: $leaderId")
         _isLeader.value = false
-        _statusMessage.value = "Resolving anchor..."
+        _statusMessage.value = "Connected!"
+        tryPlaceLocalAnchor()
+    }
 
-        viewModelScope.launch {
-            var retryDelay = RESOLVE_INITIAL_DELAY_MS
+    /**
+     * Auto-place a local anchor at the current camera position.
+     * Each device gets its own local anchor — poses are exchanged relative to it.
+     */
+    private fun tryPlaceLocalAnchor() {
+        if (localAnchor != null) return // Already placed
 
-            for (attempt in 1..RESOLVE_MAX_RETRIES) {
-                Log.d(TAG, "Resolve attempt $attempt/$RESOLVE_MAX_RETRIES")
-                _statusMessage.value = "Resolving anchor (attempt $attempt)..."
-
-                val anchor = cloudAnchorManager.resolveCloudAnchor(cloudAnchorId)
-                if (anchor != null) {
-                    poseManager.setSharedAnchor(anchor)
-                    meshManager.setConnected()
-                    _statusMessage.value = "Connected!"
-                    return@launch
-                }
-
-                if (attempt < RESOLVE_MAX_RETRIES) {
-                    Log.w(TAG, "Resolve failed, retrying in ${retryDelay}ms...")
-                    _statusMessage.value = "Resolve failed, retrying..."
-                    delay(retryDelay)
-                    retryDelay = (retryDelay * 1.5).toLong() // exponential backoff
-                }
-            }
-
-            _statusMessage.value = "Failed to resolve anchor after $RESOLVE_MAX_RETRIES attempts"
-            Log.e(TAG, "All resolve attempts exhausted")
+        val session = arSession ?: return
+        try {
+            // Create anchor at world origin (identity pose)
+            // Peer positions will be calculated relative to this
+            val anchor = session.createAnchor(Pose.IDENTITY)
+            localAnchor = anchor
+            poseManager.setSharedAnchor(anchor)
+            Log.d(TAG, "Local anchor placed at world origin")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to place local anchor, will retry on next frame", e)
         }
     }
 
@@ -200,45 +249,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _peerPoses.value = currentPoses
     }
 
-    /** Set an anchor to host (called from AR scene when anchor is placed). */
-    fun setAnchorToHost(anchor: Anchor) {
-        anchorToHost = anchor
-
-        // If we're already the leader, host immediately
-        if (_isLeader.value) {
-            hostCloudAnchor(anchor)
-        }
-    }
-
-    /** Host a Cloud Anchor and broadcast to peers. */
-    private fun hostCloudAnchor(anchor: Anchor) {
-        viewModelScope.launch {
-            _statusMessage.value = "Hosting Cloud Anchor..."
-
-            val cloudAnchorId = cloudAnchorManager.hostCloudAnchor(anchor)
-
-            if (cloudAnchorId != null) {
-                val sharedAnchor = cloudAnchorManager.getSharedAnchor() ?: run {
-                    _statusMessage.value = "Failed to get shared anchor"
-                    return@launch
-                }
-                poseManager.setSharedAnchor(sharedAnchor)
-                meshManager.announceLeadership(cloudAnchorId)
-                meshManager.setConnected()
-                _statusMessage.value = "Connected as leader!"
-            } else {
-                _statusMessage.value = "Failed to host anchor"
-            }
-        }
-    }
-
     /**
      * Called every AR frame to update pose and visualizations.
-     * #8: Throttled to avoid flooding the Nearby Connections channel.
+     * Throttled to avoid flooding the Nearby Connections channel.
      */
     fun updateFrame(cameraPose: Pose, myWorldPosition: Position) {
         if (_meshState.value != MeshState.CONNECTED) return
 
+        // Auto-place anchor if not yet done
+        if (localAnchor == null) {
+            tryPlaceLocalAnchor()
+        }
+
+        lastMyWorldPosition = myWorldPosition
         val now = System.currentTimeMillis()
         val shouldBroadcast = now - lastPoseBroadcastMs >= POSE_BROADCAST_MIN_INTERVAL_MS
 
@@ -263,6 +286,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+
+        // Update packet animations
+        packetRenderer.updateAnimations(now)
     }
 
     /** Update mapping quality (0-100). */
@@ -275,15 +301,286 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             when (state) {
                 MeshState.DISCOVERING -> "Discovering peers..."
                 MeshState.ELECTING -> "Electing leader..."
-                MeshState.RESOLVING ->
-                    if (_isLeader.value) "Hosting anchor..." else "Resolving anchor..."
                 MeshState.CONNECTED -> if (_isLeader.value) "Connected (Leader)" else "Connected"
             }
     }
 
-    /** Set parent node for line renderer. */
+    /** Select a peer as target for data exchange. */
+    fun selectPeer(peerId: Long?) {
+        _selectedPeerId.value = peerId
+    }
+
+    /** Set transmission mode. */
+    fun setTransmissionMode(mode: TransmissionMode) {
+        _transmissionMode.value = mode
+    }
+
+    /** Send simulated TCP data to the selected peer. */
+    fun sendTcpData(payload: String = "Hello via TCP!") {
+        val targetId = _selectedPeerId.value ?: return
+        val peer = findPeerByPeerId(targetId) ?: return
+        val seq = ++tcpSeqNum
+
+        if (_transmissionMode.value == TransmissionMode.CSMA_CD) {
+            viewModelScope.launch {
+                csmaSimulator.simulateTransmission(
+                    peerCount = _peers.value.size
+                ) {
+                    doSendTcp(peer, targetId, payload, seq)
+                }
+            }
+        } else {
+            doSendTcp(peer, targetId, payload, seq)
+        }
+    }
+
+    private fun doSendTcp(peer: PeerInfo, targetId: Long, payload: String, seq: Int) {
+        val message = MeshMessage.dataTcp(localId, payload, seq)
+
+        // Store send timestamp for RTT
+        pendingSendTimestamps[seq] = System.currentTimeMillis()
+
+        nearbyManager.sendMessage(peer.endpointId, message)
+        addLog("OUT", "TCP", targetId, peer.deviceModel, payload, message.toBytes().size, seq)
+
+        // Trigger packet animation
+        triggerPacketAnimation(PacketType.TCP, localId, targetId)
+
+        // Start ACK timeout with retransmit
+        val job = viewModelScope.launch {
+            for (retry in 1..TCP_MAX_RETRIES) {
+                delay(TCP_ACK_TIMEOUT_MS)
+                if (!pendingAcks.containsKey(seq)) return@launch // ACK received
+                addLog("OUT", "RETRY", targetId, peer.deviceModel,
+                    "Retransmit #$retry for seq $seq", message.toBytes().size, seq)
+                nearbyManager.sendMessage(peer.endpointId, message)
+                triggerPacketAnimation(PacketType.TCP, localId, targetId)
+            }
+            // All retries exhausted
+            addLog("OUT", "DROP", targetId, peer.deviceModel,
+                "TCP seq $seq failed after $TCP_MAX_RETRIES retries", 0, seq)
+            triggerPacketAnimation(PacketType.DROP, localId, targetId)
+            pendingAcks.remove(seq)
+            pendingSendTimestamps.remove(seq)
+        }
+        pendingAcks[seq] = job
+    }
+
+    /** Send simulated UDP data to the selected peer. */
+    fun sendUdpData(payload: String = "Hello via UDP!") {
+        val targetId = _selectedPeerId.value ?: return
+        val peer = findPeerByPeerId(targetId) ?: return
+
+        if (_transmissionMode.value == TransmissionMode.CSMA_CD) {
+            viewModelScope.launch {
+                csmaSimulator.simulateTransmission(
+                    peerCount = _peers.value.size
+                ) {
+                    doSendUdp(peer, targetId, payload)
+                }
+            }
+        } else {
+            doSendUdp(peer, targetId, payload)
+        }
+    }
+
+    private fun doSendUdp(peer: PeerInfo, targetId: Long, payload: String) {
+        val message = MeshMessage.dataUdp(localId, payload)
+        nearbyManager.sendMessage(peer.endpointId, message)
+        addLog("OUT", "UDP", targetId, peer.deviceModel, payload, message.toBytes().size)
+        triggerPacketAnimation(PacketType.UDP, localId, targetId)
+    }
+
+    /** Handle incoming data messages. */
+    private fun onDataReceived(endpointId: String, message: MeshMessage) {
+        val senderId = message.senderId
+        val senderModel = _peers.value[endpointId]?.deviceModel ?: "Unknown"
+
+        when (message.getMessageType()) {
+            MessageType.DATA_TCP -> {
+                val parts = message.data.split("|", limit = 3)
+                if (parts.size >= 2 && parts[0] == "ack") {
+                    // This is an ACK
+                    val ackSeq = parts[1].toIntOrNull() ?: return
+                    pendingAcks[ackSeq]?.cancel()
+                    pendingAcks.remove(ackSeq)
+
+                    // Calculate RTT
+                    val rtt = pendingSendTimestamps.remove(ackSeq)?.let { sendTime ->
+                        System.currentTimeMillis() - sendTime
+                    }
+
+                    // Update RTT history
+                    if (rtt != null) {
+                        _peerRttHistory.update { history ->
+                            val peerHistory = history[senderId]?.toMutableList() ?: mutableListOf()
+                            peerHistory.add(rtt)
+                            if (peerHistory.size > RTT_HISTORY_SIZE) {
+                                peerHistory.removeAt(0)
+                            }
+                            history + (senderId to peerHistory.toList())
+                        }
+                    }
+
+                    addLog("IN", "ACK", senderId, senderModel,
+                        "ACK for seq $ackSeq", message.toBytes().size, ackSeq, rtt)
+                    triggerPacketAnimation(PacketType.ACK, senderId, localId)
+                } else if (parts.size >= 3 && parts[0] == "seq") {
+                    // This is data — log it and send ACK back
+                    val seq = parts[1].toIntOrNull() ?: return
+                    val payload = parts[2]
+                    addLog("IN", "TCP", senderId, senderModel,
+                        payload, message.toBytes().size, seq)
+                    triggerPacketAnimation(PacketType.TCP, senderId, localId)
+                    // Send ACK
+                    nearbyManager.sendMessage(endpointId, MeshMessage.dataTcpAck(localId, seq))
+                    addLog("OUT", "ACK", senderId, senderModel,
+                        "ACK for seq $seq", 0, seq)
+                    triggerPacketAnimation(PacketType.ACK, localId, senderId)
+                }
+            }
+            MessageType.DATA_UDP -> {
+                // Simulate ~10% packet loss
+                if (Random.nextDouble() < UDP_DROP_PROBABILITY) {
+                    addLog("IN", "DROP", senderId, senderModel,
+                        "Packet dropped (simulated loss)", message.toBytes().size)
+                    triggerPacketAnimation(PacketType.DROP, senderId, localId)
+                } else {
+                    addLog("IN", "UDP", senderId, senderModel,
+                        message.data, message.toBytes().size)
+                    triggerPacketAnimation(PacketType.UDP, senderId, localId)
+                }
+            }
+            else -> {}
+        }
+    }
+
+    private fun triggerPacketAnimation(type: PacketType, fromId: Long, toId: Long) {
+        val myPos = lastMyWorldPosition ?: return
+
+        val startPos: Position
+        val endPos: Position
+
+        if (fromId == localId) {
+            startPos = myPos
+            endPos = getWorldPositionForPeer(toId) ?: return
+        } else {
+            startPos = getWorldPositionForPeer(fromId) ?: return
+            endPos = myPos
+        }
+
+        packetRenderer.animatePacket(type, startPos, endPos)
+    }
+
+    private fun getWorldPositionForPeer(peerId: Long): Position? {
+        val poseData = _peerPoses.value[peerId] ?: return null
+        val worldPose = poseManager.relativeToWorldPose(poseData) ?: return null
+        return Position(worldPose.tx(), worldPose.ty(), worldPose.tz())
+    }
+
+    private fun addLog(
+        direction: String, protocol: String, peerId: Long, peerModel: String,
+        payload: String, sizeBytes: Int, seqNum: Int? = null, rttMs: Long? = null
+    ) {
+        val entry = DataLogEntry(
+            timestamp = System.currentTimeMillis(),
+            direction = direction,
+            protocol = protocol,
+            peerId = peerId,
+            peerModel = peerModel,
+            payload = payload,
+            sizeBytes = sizeBytes,
+            seqNum = seqNum,
+            rttMs = rttMs
+        )
+        _dataLogs.update { logs -> (logs + entry).takeLast(MAX_LOG_ENTRIES) }
+    }
+
+    private fun findPeerByPeerId(peerId: Long): PeerInfo? {
+        return _peers.value.values.find { it.peerId == peerId }
+    }
+
+    // --- Quiz ---
+
+    fun startQuiz() {
+        val questions = quizEngine.generateQuiz(
+            localId = localId,
+            peers = _peers.value,
+            leaderId = _currentLeaderId.value,
+            peerRttHistory = _peerRttHistory.value
+        )
+        _quizState.value = QuizState(
+            isActive = true,
+            questions = questions,
+            timerSecondsRemaining = 30
+        )
+        startQuizTimer()
+    }
+
+    fun answerQuiz(index: Int) {
+        val current = _quizState.value
+        val question = current.currentQuestion ?: return
+        if (current.isAnswerRevealed) return
+
+        val isCorrect = index == question.correctIndex
+        _quizState.value = current.copy(
+            selectedAnswer = index,
+            isAnswerRevealed = true,
+            score = if (isCorrect) current.score + 1 else current.score,
+            answeredCount = current.answeredCount + 1
+        )
+    }
+
+    fun nextQuestion() {
+        val current = _quizState.value
+        if (current.currentIndex + 1 >= current.questions.size) {
+            // Quiz finished
+            quizTimerJob?.cancel()
+            _quizState.value = current.copy(
+                currentIndex = current.currentIndex + 1,
+                selectedAnswer = null,
+                isAnswerRevealed = false
+            )
+        } else {
+            _quizState.value = current.copy(
+                currentIndex = current.currentIndex + 1,
+                selectedAnswer = null,
+                isAnswerRevealed = false,
+                timerSecondsRemaining = 30
+            )
+            startQuizTimer()
+        }
+    }
+
+    fun closeQuiz() {
+        quizTimerJob?.cancel()
+        _quizState.value = QuizState()
+    }
+
+    private fun startQuizTimer() {
+        quizTimerJob?.cancel()
+        quizTimerJob = viewModelScope.launch {
+            while (_quizState.value.timerSecondsRemaining > 0 && !_quizState.value.isAnswerRevealed) {
+                delay(1000)
+                _quizState.update { it.copy(timerSecondsRemaining = it.timerSecondsRemaining - 1) }
+            }
+            // Auto-reveal if time ran out
+            if (!_quizState.value.isAnswerRevealed) {
+                _quizState.update {
+                    it.copy(
+                        isAnswerRevealed = true,
+                        selectedAnswer = -1,
+                        answeredCount = it.answeredCount + 1
+                    )
+                }
+            }
+        }
+    }
+
+    /** Set parent node for line renderer and packet renderer. */
     fun setVisualizationParent(node: Node) {
         lineRenderer.setParentNode(node)
+        packetRenderer.setParentNode(node)
     }
 
     override fun onCleared() {
@@ -294,8 +591,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             meshManager.cleanup()
         }
 
-        cloudAnchorManager.cleanup()
+        localAnchor?.detach()
         poseManager.cleanup()
         lineRenderer.cleanup()
+        packetRenderer.cleanup()
+        quizTimerJob?.cancel()
     }
 }

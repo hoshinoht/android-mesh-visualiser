@@ -10,7 +10,7 @@ class MeshVisualizerApp : Application() {
         
         // Timeouts
         const val ELECTION_TIMEOUT_MS = 2000L
-        const val MESH_FORMATION_TIMEOUT_MS = 5000L
+        const val MESH_FORMATION_TIMEOUT_MS = 15000L
         const val POSE_BROADCAST_INTERVAL_MS = 33L // ~30fps
         
         // Cloud Anchor TTL (in days)

@@ -16,6 +16,9 @@ data class PeerInfo(
         var relativeY: Float = 0f,
         var relativeZ: Float = 0f,
 
+        /** Device model name (e.g. "Pixel 7") */
+        var deviceModel: String = "",
+
         /** Last update timestamp */
         var lastUpdateMs: Long = System.currentTimeMillis()
 ) {

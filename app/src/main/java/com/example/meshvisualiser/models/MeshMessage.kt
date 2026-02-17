@@ -42,6 +42,22 @@ data class MeshMessage(val type: Int, val senderId: Long, val data: String = "")
             return MeshMessage(MessageType.COORDINATOR.value, localId, cloudAnchorId)
         }
 
+        fun deviceInfo(localId: Long, model: String): MeshMessage {
+            return MeshMessage(MessageType.DEVICE_INFO.value, localId, model)
+        }
+
+        fun dataTcp(localId: Long, payload: String, seqNum: Int): MeshMessage {
+            return MeshMessage(MessageType.DATA_TCP.value, localId, "seq|$seqNum|$payload")
+        }
+
+        fun dataTcpAck(localId: Long, seqNum: Int): MeshMessage {
+            return MeshMessage(MessageType.DATA_TCP.value, localId, "ack|$seqNum")
+        }
+
+        fun dataUdp(localId: Long, payload: String): MeshMessage {
+            return MeshMessage(MessageType.DATA_UDP.value, localId, payload)
+        }
+
         fun poseUpdate(
             localId: Long,
             x: Float,

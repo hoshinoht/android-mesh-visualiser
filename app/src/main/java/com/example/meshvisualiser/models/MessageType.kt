@@ -17,8 +17,17 @@ enum class MessageType(val value: Int) {
     COORDINATOR(3),
     
     /** Pose update with relative coordinates */
-    POSE_UPDATE(4);
-    
+    POSE_UPDATE(4),
+
+    /** Device info (model name) sent after handshake */
+    DEVICE_INFO(5),
+
+    /** Simulated TCP data (reliable, with ACK) */
+    DATA_TCP(6),
+
+    /** Simulated UDP data (fire-and-forget) */
+    DATA_UDP(7);
+
     companion object {
         fun fromValue(value: Int): MessageType? = entries.find { it.value == value }
     }

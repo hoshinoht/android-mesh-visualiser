@@ -20,13 +20,13 @@ import kotlinx.coroutines.flow.asStateFlow
  * 1. Any node can start an election by sending ELECTION to all higher-ID nodes
  * 2. If a node receives ELECTION from a lower-ID node, it replies OK and starts its own election
  * 3. If no OK is received within timeout, the node becomes the leader
- * 4. The leader broadcasts COORDINATOR with the Cloud Anchor ID
+ * 4. The leader broadcasts COORDINATOR to all peers
  */
 class MeshManager(
     private val localId: Long,
     private val nearbyManager: NearbyConnectionsManager,
     private val onBecomeLeader: () -> Unit,
-    private val onNewLeader: (leaderId: Long, cloudAnchorId: String) -> Unit,
+    private val onNewLeader: (leaderId: Long) -> Unit,
     private val onPoseUpdate: (peerId: Long, poseData: PoseData) -> Unit
 ) {
     companion object {
@@ -45,9 +45,6 @@ class MeshManager(
     private var electionTimeoutRunnable: Runnable? = null
     private var meshFormationTimeoutRunnable: Runnable? = null
 
-    // Stored anchor ID so we can re-send COORDINATOR to late joiners
-    private var announcedCloudAnchorId: String? = null
-
     val isLeader: Boolean
         get() = _currentLeaderId.value == localId
 
@@ -59,21 +56,20 @@ class MeshManager(
             MessageType.HANDSHAKE -> handleHandshake(endpointId, senderId)
             MessageType.ELECTION -> handleElectionMessage(endpointId, senderId)
             MessageType.OK -> handleOkMessage(senderId)
-            MessageType.COORDINATOR -> handleCoordinatorMessage(senderId, message.data)
+            MessageType.COORDINATOR -> handleCoordinatorMessage(senderId)
             MessageType.POSE_UPDATE -> handlePoseUpdate(senderId, message)
             else -> { /* Ignore */ }
         }
     }
 
     /**
-     * Handle handshake from a peer. If we're the leader and already have a cloud anchor,
-     * re-send the COORDINATOR message so late joiners can resolve the anchor.
+     * Handle handshake from a peer. If we're the leader, re-send COORDINATOR
+     * so late joiners know who the leader is.
      */
     private fun handleHandshake(endpointId: String, senderId: Long) {
-        val anchorId = announcedCloudAnchorId
-        if (isLeader && anchorId != null) {
+        if (isLeader) {
             Log.d(TAG, "Re-sending COORDINATOR to late joiner $senderId ($endpointId)")
-            nearbyManager.sendMessage(endpointId, MeshMessage.coordinator(localId, anchorId))
+            nearbyManager.sendMessage(endpointId, MeshMessage.coordinator(localId, ""))
         }
     }
 
@@ -84,8 +80,14 @@ class MeshManager(
 
         meshFormationTimeoutRunnable = Runnable {
             if (_meshState.value == MeshState.DISCOVERING) {
-                Log.d(TAG, "Mesh formation timeout - starting election")
-                startElection()
+                val validPeers = nearbyManager.getValidPeers()
+                if (validPeers.isNotEmpty()) {
+                    Log.d(TAG, "Mesh formation timeout - ${validPeers.size} peer(s) found, starting election")
+                    startElection()
+                } else {
+                    Log.d(TAG, "Mesh formation timeout - no peers yet, extending discovery")
+                    handler.postDelayed(meshFormationTimeoutRunnable!!, MeshVisualizerApp.MESH_FORMATION_TIMEOUT_MS)
+                }
             }
         }
         handler.postDelayed(meshFormationTimeoutRunnable!!, MeshVisualizerApp.MESH_FORMATION_TIMEOUT_MS)
@@ -138,17 +140,14 @@ class MeshManager(
         electionTimeoutRunnable?.let { handler.removeCallbacks(it) }
     }
 
-    private fun handleCoordinatorMessage(leaderId: Long, cloudAnchorId: String) {
-        Log.d(TAG, "Received COORDINATOR from $leaderId with anchor: $cloudAnchorId")
+    private fun handleCoordinatorMessage(leaderId: Long) {
+        Log.d(TAG, "Received COORDINATOR from $leaderId")
 
         _currentLeaderId.value = leaderId
         isWaitingForOk = false
         electionTimeoutRunnable?.let { handler.removeCallbacks(it) }
-
-        if (cloudAnchorId.isNotEmpty()) {
-            _meshState.value = MeshState.RESOLVING
-            onNewLeader(leaderId, cloudAnchorId)
-        }
+        _meshState.value = MeshState.CONNECTED
+        onNewLeader(leaderId)
     }
 
     private fun handlePoseUpdate(senderId: Long, message: MeshMessage) {
@@ -165,16 +164,10 @@ class MeshManager(
         Log.d(TAG, "Becoming leader!")
         _currentLeaderId.value = localId
         isWaitingForOk = false
-        _meshState.value = MeshState.RESOLVING
-        onBecomeLeader()
-    }
-
-    /** Called by leader after Cloud Anchor is hosted. Broadcasts COORDINATOR message to all peers. */
-    fun announceLeadership(cloudAnchorId: String) {
-        Log.d(TAG, "Announcing leadership with anchor: $cloudAnchorId")
-        announcedCloudAnchorId = cloudAnchorId
-        nearbyManager.broadcastMessage(MeshMessage.coordinator(localId, cloudAnchorId))
         _meshState.value = MeshState.CONNECTED
+        onBecomeLeader()
+        // Announce to all peers
+        nearbyManager.broadcastMessage(MeshMessage.coordinator(localId, ""))
     }
 
     /** Broadcast pose update to all peers. */
@@ -182,15 +175,9 @@ class MeshManager(
         nearbyManager.broadcastMessage(MeshMessage.poseUpdate(localId, x, y, z, qx, qy, qz, qw))
     }
 
-    /** Set mesh state to connected (called after anchor is resolved). */
-    fun setConnected() {
-        _meshState.value = MeshState.CONNECTED
-    }
-
     /** Cleanup resources. */
     fun cleanup() {
         electionTimeoutRunnable?.let { handler.removeCallbacks(it) }
         meshFormationTimeoutRunnable?.let { handler.removeCallbacks(it) }
-        announcedCloudAnchorId = null
     }
 }
