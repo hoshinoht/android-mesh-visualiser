@@ -9,8 +9,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -19,15 +23,27 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.CallMade
+import androidx.compose.material.icons.automirrored.filled.CallReceived
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ElectricBolt
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -98,6 +114,8 @@ fun MainScreen(viewModel: MainViewModel) {
     val currentLeaderId by viewModel.currentLeaderId.collectAsStateWithLifecycle()
     val statusMessage by viewModel.statusMessage.collectAsStateWithLifecycle()
     val dataLogs by viewModel.dataLogs.collectAsStateWithLifecycle()
+    val transferEvents by viewModel.transferEvents.collectAsStateWithLifecycle()
+    val showRawLog by viewModel.showRawLog.collectAsStateWithLifecycle()
     val selectedPeerId by viewModel.selectedPeerId.collectAsStateWithLifecycle()
     val peerRttHistory by viewModel.peerRttHistory.collectAsStateWithLifecycle()
     val transmissionMode by viewModel.transmissionMode.collectAsStateWithLifecycle()
@@ -202,6 +220,9 @@ fun MainScreen(viewModel: MainViewModel) {
         if (peers.isNotEmpty()) {
             DataExchangePanel(
                 dataLogs = dataLogs,
+                transferEvents = transferEvents,
+                showRawLog = showRawLog,
+                onToggleRawLog = { viewModel.toggleRawLog() },
                 selectedPeerId = selectedPeerId,
                 peers = peers,
                 transmissionMode = transmissionMode,
@@ -491,6 +512,9 @@ fun PeerListPanel(
 @Composable
 fun DataExchangePanel(
     dataLogs: List<DataLogEntry>,
+    transferEvents: List<TransferEvent>,
+    showRawLog: Boolean,
+    onToggleRawLog: () -> Unit,
     selectedPeerId: Long?,
     peers: Map<String, PeerInfo>,
     transmissionMode: TransmissionMode,
@@ -500,12 +524,18 @@ fun DataExchangePanel(
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
+    val rawListState = rememberLazyListState()
     val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
 
-    // Auto-scroll to bottom when new logs arrive
+    // Auto-scroll to bottom when new entries arrive
+    LaunchedEffect(transferEvents.size) {
+        if (transferEvents.isNotEmpty() && !showRawLog) {
+            listState.animateScrollToItem(transferEvents.lastIndex)
+        }
+    }
     LaunchedEffect(dataLogs.size) {
-        if (dataLogs.isNotEmpty()) {
-            listState.animateScrollToItem(dataLogs.lastIndex)
+        if (dataLogs.isNotEmpty() && showRawLog) {
+            rawListState.animateScrollToItem(dataLogs.lastIndex)
         }
     }
 
@@ -567,55 +597,323 @@ fun DataExchangePanel(
             Spacer(modifier = Modifier.height(4.dp))
 
             // Log area
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 180.dp)
-                    .clip(MaterialTheme.shapes.extraSmall)
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
-                    .padding(4.dp)
-            ) {
-                if (dataLogs.isEmpty()) {
-                    item {
+            if (showRawLog) {
+                // Raw monospace log (existing behavior)
+                LazyColumn(
+                    state = rawListState,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 180.dp)
+                        .clip(MaterialTheme.shapes.extraSmall)
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                        .padding(4.dp)
+                ) {
+                    if (dataLogs.isEmpty()) {
+                        item {
+                            Text(
+                                text = "No data exchanged yet",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(8.dp)
+                            )
+                        }
+                    }
+                    items(dataLogs) { entry ->
+                        val arrow = if (entry.direction == "OUT") "\u2192" else "\u2190"
+                        val color = when (entry.protocol) {
+                            "TCP" -> LogTcp
+                            "UDP" -> LogUdp
+                            "ACK" -> LogAck
+                            "DROP", "RETRY" -> LogError
+                            else -> MaterialTheme.colorScheme.onSurface
+                        }
+                        val seqStr = entry.seqNum?.let { " #$it" } ?: ""
+                        val rttStr = entry.rttMs?.let { " [${it}ms]" } ?: ""
+                        val modelStr = entry.peerModel.ifEmpty {
+                            entry.peerId.toString().takeLast(6)
+                        }
+
                         Text(
-                            text = "No data exchanged yet",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(8.dp)
+                            text = "[${timeFormat.format(Date(entry.timestamp))}] " +
+                                "$arrow ${entry.protocol}$seqStr " +
+                                "${if (entry.direction == "OUT") "to" else "from"} $modelStr " +
+                                "(${entry.sizeBytes}B) ${entry.payload}$rttStr",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            ),
+                            color = color,
+                            modifier = Modifier.padding(vertical = 1.dp)
                         )
                     }
                 }
-                items(dataLogs) { entry ->
-                    val arrow = if (entry.direction == "OUT") "\u2192" else "\u2190"
-                    val color = when (entry.protocol) {
-                        "TCP" -> LogTcp
-                        "UDP" -> LogUdp
-                        "ACK" -> LogAck
-                        "DROP", "RETRY" -> LogError
-                        else -> MaterialTheme.colorScheme.onSurface
+            } else {
+                // Friendly transfer event cards
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 220.dp)
+                        .clip(MaterialTheme.shapes.extraSmall)
+                        .padding(2.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (transferEvents.isEmpty()) {
+                        item {
+                            Text(
+                                text = "No data exchanged yet",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(8.dp)
+                            )
+                        }
                     }
-                    val seqStr = entry.seqNum?.let { " #$it" } ?: ""
-                    val rttStr = entry.rttMs?.let { " [${it}ms]" } ?: ""
-                    val modelStr = entry.peerModel.ifEmpty {
-                        entry.peerId.toString().takeLast(6)
+                    items(transferEvents, key = { it.id }) { event ->
+                        TransferEventCard(event = event)
                     }
+                }
+            }
 
+            // Toggle raw/friendly view
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onToggleRawLog() }
+                    .padding(top = 4.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = if (showRawLog) Icons.Default.Visibility else Icons.Default.Code,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = if (showRawLog) "Show friendly view" else "Show raw protocol log",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun TransferEventCard(event: TransferEvent) {
+    val isSend = event.type == TransferType.SEND_TCP || event.type == TransferType.SEND_UDP
+    val isTcp = event.type == TransferType.SEND_TCP || event.type == TransferType.RECEIVE_TCP
+    val protocolColor = if (isTcp) LogTcp else LogUdp
+    val peerName = event.peerModel.ifEmpty { event.peerId.toString().takeLast(6) }
+
+    // Animate progress bar
+    val progressAnimatable = remember { Animatable(0f) }
+    val isIndeterminate = event.status == TransferStatus.IN_PROGRESS || event.status == TransferStatus.RETRYING
+    LaunchedEffect(event.status) {
+        when (event.status) {
+            TransferStatus.IN_PROGRESS -> { /* stays indeterminate */ }
+            TransferStatus.RETRYING -> { /* stays indeterminate */ }
+            TransferStatus.DELIVERED, TransferStatus.FAILED ->
+                progressAnimatable.animateTo(1f, animationSpec = tween(300))
+            TransferStatus.SENT ->
+                progressAnimatable.animateTo(1f, animationSpec = tween(500))
+            TransferStatus.DROPPED ->
+                progressAnimatable.animateTo(1f, animationSpec = tween(300))
+        }
+    }
+
+    // Status line visibility
+    val showStatus = event.status != TransferStatus.IN_PROGRESS
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        ),
+        shape = MaterialTheme.shapes.small
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            // Header row: icon + "Sending to / Received from" + protocol badge
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(
+                    imageVector = if (isSend) Icons.AutoMirrored.Filled.CallMade else Icons.AutoMirrored.Filled.CallReceived,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = protocolColor
+                )
+                Text(
+                    text = if (isSend) "Sending to $peerName" else "Received from $peerName",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f)
+                )
+                Surface(
+                    color = protocolColor.copy(alpha = 0.15f),
+                    shape = MaterialTheme.shapes.extraSmall
+                ) {
                     Text(
-                        text = "[${timeFormat.format(Date(entry.timestamp))}] " +
-                            "$arrow ${entry.protocol}$seqStr " +
-                            "${if (entry.direction == "OUT") "to" else "from"} $modelStr " +
-                            "(${entry.sizeBytes}B) ${entry.payload}$rttStr",
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace
-                        ),
-                        color = color,
-                        modifier = Modifier.padding(vertical = 1.dp)
+                        text = if (isTcp) "TCP" else "UDP",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = protocolColor,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                     )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Progress bar with direction label
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                if (isIndeterminate) {
+                    LinearProgressIndicator(
+                        modifier = Modifier.weight(1f).height(4.dp),
+                        color = protocolColor,
+                        trackColor = protocolColor.copy(alpha = 0.15f)
+                    )
+                } else {
+                    LinearProgressIndicator(
+                        progress = { progressAnimatable.value },
+                        modifier = Modifier.weight(1f).height(4.dp),
+                        color = protocolColor,
+                        trackColor = protocolColor.copy(alpha = 0.15f)
+                    )
+                }
+                Text(
+                    text = if (isSend) "You \u2192 Peer" else "Peer \u2192 You",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 10.sp
+                )
+            }
+
+            // Status line (animated entry)
+            AnimatedVisibility(
+                visible = showStatus,
+                enter = expandVertically(
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                        stiffness = Spring.StiffnessMedium
+                    )
+                ) + fadeIn()
+            ) {
+                Column(modifier = Modifier.padding(top = 6.dp)) {
+                    val statusInfo = getStatusInfo(event)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = statusInfo.icon,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = statusInfo.color
+                        )
+                        Text(
+                            text = statusInfo.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = statusInfo.color,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    // Educational hint
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.padding(top = 2.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = null,
+                            modifier = Modifier.size(12.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                        Text(
+                            text = statusInfo.hint,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontSize = 10.sp,
+                                fontStyle = FontStyle.Italic
+                            ),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                    }
                 }
             }
         }
     }
 }
+
+private data class StatusInfo(
+    val icon: ImageVector,
+    val message: String,
+    val color: Color,
+    val hint: String
+)
+
+@Composable
+private fun getStatusInfo(event: TransferEvent): StatusInfo {
+    val isTcp = event.type == TransferType.SEND_TCP || event.type == TransferType.RECEIVE_TCP
+    val isSend = event.type == TransferType.SEND_TCP || event.type == TransferType.SEND_UDP
+
+    return when (event.status) {
+        TransferStatus.DELIVERED -> {
+            val rttStr = event.rttMs?.let { " (${it}ms)" } ?: ""
+            if (isSend) {
+                StatusInfo(
+                    icon = Icons.Default.CheckCircle,
+                    message = "Delivered! Peer confirmed$rttStr",
+                    color = LogAck,
+                    hint = "TCP checks that data arrived safely"
+                )
+            } else {
+                StatusInfo(
+                    icon = Icons.Default.CheckCircle,
+                    message = if (isTcp) "Received! Sent confirmation back" else "Received successfully",
+                    color = LogAck,
+                    hint = if (isTcp) "TCP requires the receiver to acknowledge data" else "This UDP packet made it through"
+                )
+            }
+        }
+        TransferStatus.SENT -> StatusInfo(
+            icon = Icons.Default.ElectricBolt,
+            message = "Sent! No confirmation needed",
+            color = LogUdp,
+            hint = "UDP is fast but has no delivery guarantee"
+        )
+        TransferStatus.DROPPED -> StatusInfo(
+            icon = Icons.Default.Close,
+            message = "Lost in transit!",
+            color = LogError,
+            hint = "Without TCP's checking, lost data goes unnoticed"
+        )
+        TransferStatus.RETRYING -> StatusInfo(
+            icon = Icons.Default.Refresh,
+            message = "No response... retrying (${event.retryCount}/$TCP_MAX_RETRIES_UI)",
+            color = StatusElecting, // amber-ish
+            hint = "TCP automatically retries when no ACK arrives"
+        )
+        TransferStatus.FAILED -> StatusInfo(
+            icon = Icons.Default.Error,
+            message = "Failed after ${event.retryCount} retries",
+            color = LogError,
+            hint = "Even TCP gives up after too many failed attempts"
+        )
+        TransferStatus.IN_PROGRESS -> StatusInfo(
+            icon = Icons.Default.CheckCircle,
+            message = "Delivering...",
+            color = LogTcp,
+            hint = "Waiting for peer to confirm receipt"
+        )
+    }
+}
+
+private const val TCP_MAX_RETRIES_UI = 3
 

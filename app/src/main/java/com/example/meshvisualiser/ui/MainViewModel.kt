@@ -47,6 +47,21 @@ data class DataLogEntry(
     val rttMs: Long? = null
 )
 
+/** High-level transfer event for the friendly UI view. */
+data class TransferEvent(
+    val id: Long,
+    val timestamp: Long,
+    val type: TransferType,
+    val peerModel: String,
+    val peerId: Long,
+    val status: TransferStatus,
+    val rttMs: Long? = null,
+    val retryCount: Int = 0
+)
+
+enum class TransferType { SEND_TCP, SEND_UDP, RECEIVE_TCP, RECEIVE_UDP }
+enum class TransferStatus { IN_PROGRESS, DELIVERED, SENT, DROPPED, RETRYING, FAILED }
+
 /**
  * ViewModel for the main AR mesh visualization screen. Coordinates all managers and handles the
  * mesh lifecycle.
@@ -102,11 +117,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _dataLogs = MutableStateFlow<List<DataLogEntry>>(emptyList())
     val dataLogs: StateFlow<List<DataLogEntry>> = _dataLogs.asStateFlow()
 
+    private val _transferEvents = MutableStateFlow<List<TransferEvent>>(emptyList())
+    val transferEvents: StateFlow<List<TransferEvent>> = _transferEvents.asStateFlow()
+
+    private val _showRawLog = MutableStateFlow(false)
+    val showRawLog: StateFlow<Boolean> = _showRawLog.asStateFlow()
+
     private val _selectedPeerId = MutableStateFlow<Long?>(null)
     val selectedPeerId: StateFlow<Long?> = _selectedPeerId.asStateFlow()
 
     private var tcpSeqNum = 0
     private val pendingAcks = mutableMapOf<Int, Job>()
+    private val seqToTransferEventId = mutableMapOf<Int, Long>()
+    private var nextTransferEventId = 1L
 
     // RTT tracking
     private val pendingSendTimestamps = mutableMapOf<Int, Long>() // seqNum → sendTimeMs
@@ -343,6 +366,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         nearbyManager.sendMessage(peer.endpointId, message)
         addLog("OUT", "TCP", targetId, peer.deviceModel, payload, message.toBytes().size, seq)
 
+        // Emit transfer event
+        val eventId = nextTransferEventId++
+        seqToTransferEventId[seq] = eventId
+        addTransferEvent(TransferEvent(
+            id = eventId, timestamp = System.currentTimeMillis(),
+            type = TransferType.SEND_TCP, peerModel = peer.deviceModel,
+            peerId = targetId, status = TransferStatus.IN_PROGRESS
+        ))
+
         // Trigger packet animation
         triggerPacketAnimation(PacketType.TCP, localId, targetId)
 
@@ -353,15 +385,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (!pendingAcks.containsKey(seq)) return@launch // ACK received
                 addLog("OUT", "RETRY", targetId, peer.deviceModel,
                     "Retransmit #$retry for seq $seq", message.toBytes().size, seq)
+                updateTransferEvent(eventId) { it.copy(status = TransferStatus.RETRYING, retryCount = retry) }
                 nearbyManager.sendMessage(peer.endpointId, message)
                 triggerPacketAnimation(PacketType.TCP, localId, targetId)
             }
             // All retries exhausted
             addLog("OUT", "DROP", targetId, peer.deviceModel,
                 "TCP seq $seq failed after $TCP_MAX_RETRIES retries", 0, seq)
+            updateTransferEvent(eventId) { it.copy(status = TransferStatus.FAILED, retryCount = TCP_MAX_RETRIES) }
             triggerPacketAnimation(PacketType.DROP, localId, targetId)
             pendingAcks.remove(seq)
             pendingSendTimestamps.remove(seq)
+            seqToTransferEventId.remove(seq)
         }
         pendingAcks[seq] = job
     }
@@ -388,6 +423,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val message = MeshMessage.dataUdp(localId, payload)
         nearbyManager.sendMessage(peer.endpointId, message)
         addLog("OUT", "UDP", targetId, peer.deviceModel, payload, message.toBytes().size)
+        addTransferEvent(TransferEvent(
+            id = nextTransferEventId++, timestamp = System.currentTimeMillis(),
+            type = TransferType.SEND_UDP, peerModel = peer.deviceModel,
+            peerId = targetId, status = TransferStatus.SENT
+        ))
         triggerPacketAnimation(PacketType.UDP, localId, targetId)
     }
 
@@ -422,6 +462,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
 
+                    // Update the matching SEND_TCP transfer event to DELIVERED
+                    seqToTransferEventId.remove(ackSeq)?.let { eventId ->
+                        updateTransferEvent(eventId) { it.copy(status = TransferStatus.DELIVERED, rttMs = rtt) }
+                    }
+
                     addLog("IN", "ACK", senderId, senderModel,
                         "ACK for seq $ackSeq", message.toBytes().size, ackSeq, rtt)
                     triggerPacketAnimation(PacketType.ACK, senderId, localId)
@@ -431,6 +476,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val payload = parts[2]
                     addLog("IN", "TCP", senderId, senderModel,
                         payload, message.toBytes().size, seq)
+                    addTransferEvent(TransferEvent(
+                        id = nextTransferEventId++, timestamp = System.currentTimeMillis(),
+                        type = TransferType.RECEIVE_TCP, peerModel = senderModel,
+                        peerId = senderId, status = TransferStatus.DELIVERED
+                    ))
                     triggerPacketAnimation(PacketType.TCP, senderId, localId)
                     // Send ACK
                     nearbyManager.sendMessage(endpointId, MeshMessage.dataTcpAck(localId, seq))
@@ -444,10 +494,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (Random.nextDouble() < UDP_DROP_PROBABILITY) {
                     addLog("IN", "DROP", senderId, senderModel,
                         "Packet dropped (simulated loss)", message.toBytes().size)
+                    addTransferEvent(TransferEvent(
+                        id = nextTransferEventId++, timestamp = System.currentTimeMillis(),
+                        type = TransferType.RECEIVE_UDP, peerModel = senderModel,
+                        peerId = senderId, status = TransferStatus.DROPPED
+                    ))
                     triggerPacketAnimation(PacketType.DROP, senderId, localId)
                 } else {
                     addLog("IN", "UDP", senderId, senderModel,
                         message.data, message.toBytes().size)
+                    addTransferEvent(TransferEvent(
+                        id = nextTransferEventId++, timestamp = System.currentTimeMillis(),
+                        type = TransferType.RECEIVE_UDP, peerModel = senderModel,
+                        peerId = senderId, status = TransferStatus.DELIVERED
+                    ))
                     triggerPacketAnimation(PacketType.UDP, senderId, localId)
                 }
             }
@@ -494,6 +554,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             rttMs = rttMs
         )
         _dataLogs.update { logs -> (logs + entry).takeLast(MAX_LOG_ENTRIES) }
+    }
+
+    private fun addTransferEvent(event: TransferEvent) {
+        _transferEvents.update { events -> (events + event).takeLast(MAX_LOG_ENTRIES) }
+    }
+
+    private fun updateTransferEvent(eventId: Long, transform: (TransferEvent) -> TransferEvent) {
+        _transferEvents.update { events ->
+            events.map { if (it.id == eventId) transform(it) else it }
+        }
+    }
+
+    fun toggleRawLog() {
+        _showRawLog.update { !it }
     }
 
     private fun findPeerByPeerId(peerId: Long): PeerInfo? {
