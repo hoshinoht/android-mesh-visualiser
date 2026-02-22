@@ -1,11 +1,8 @@
 package com.example.meshvisualiser.ui
 
 import android.os.Bundle
-import android.util.Log
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -67,42 +64,25 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
-    companion object {
-        private const val TAG = "MainActivity"
-    }
-
     private val viewModel: MainViewModel by viewModels()
-
-    private val permissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
-            val allGranted = permissions.values.all { it }
-            if (allGranted) {
-                Log.d(TAG, "All permissions granted")
-                initializeApp()
-            } else {
-                Toast.makeText(
-                    this,
-                    "Permissions required for AR mesh functionality",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        setContent { MeshVisualiserTheme { MainScreen(viewModel = viewModel) } }
+        setContent {
+            MeshVisualiserTheme {
+                val onboardingCompleted by viewModel.onboardingCompleted.collectAsStateWithLifecycle()
+                val startDest = if (onboardingCompleted)
+                    com.example.meshvisualiser.navigation.Routes.CONNECTION
+                else
+                    com.example.meshvisualiser.navigation.Routes.ONBOARDING
 
-        // Request permissions
-        if (PermissionHelper.hasAllPermissions(this)) {
-            initializeApp()
-        } else {
-            permissionLauncher.launch(PermissionHelper.getRequiredPermissions())
+                com.example.meshvisualiser.navigation.MeshNavHost(
+                    viewModel = viewModel,
+                    startDestination = startDest
+                )
+            }
         }
-    }
-
-    private fun initializeApp() {
-        viewModel.initialize()
     }
 }
 
@@ -282,7 +262,6 @@ fun ARSceneViewComposable(viewModel: MainViewModel) {
 
                 onSessionCreated = { session ->
                     viewModel.setArSession(session)
-                    viewModel.startMesh()
                 }
             }
         },

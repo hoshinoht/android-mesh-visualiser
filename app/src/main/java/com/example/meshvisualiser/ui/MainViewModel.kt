@@ -4,10 +4,12 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.meshvisualiser.MeshVisualizerApp
 import com.example.meshvisualiser.ar.LineRenderer
 import com.example.meshvisualiser.ar.PacketRenderer
 import com.example.meshvisualiser.ar.PacketType
 import com.example.meshvisualiser.ar.PoseManager
+import com.example.meshvisualiser.data.UserPreferencesRepository
 import com.example.meshvisualiser.mesh.MeshManager
 import com.example.meshvisualiser.models.MeshMessage
 import com.example.meshvisualiser.models.MeshState
@@ -29,8 +31,10 @@ import kotlin.random.Random
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -61,6 +65,7 @@ data class TransferEvent(
 
 enum class TransferType { SEND_TCP, SEND_UDP, RECEIVE_TCP, RECEIVE_UDP }
 enum class TransferStatus { IN_PROGRESS, DELIVERED, SENT, DROPPED, RETRYING, FAILED }
+enum class ConnectionFlowState { IDLE, JOINING, IN_LOBBY, STARTING }
 
 /**
  * ViewModel for the main AR mesh visualization screen. Coordinates all managers and handles the
@@ -76,6 +81,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val MAX_LOG_ENTRIES = 100
         private const val RTT_HISTORY_SIZE = 20
     }
+
+    // Preferences
+    private val prefsRepo = UserPreferencesRepository(application)
+
+    val onboardingCompleted: StateFlow<Boolean> = prefsRepo.onboardingCompleted
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val lastGroupCode: StateFlow<String> = prefsRepo.lastGroupCode
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "")
+
+    // Connection flow
+    private val _groupCode = MutableStateFlow("")
+    val groupCode: StateFlow<String> = _groupCode.asStateFlow()
+
+    private val _groupCodeError = MutableStateFlow<String?>(null)
+    val groupCodeError: StateFlow<String?> = _groupCodeError.asStateFlow()
+
+    private val _connectionState = MutableStateFlow(ConnectionFlowState.IDLE)
+    val connectionState: StateFlow<ConnectionFlowState> = _connectionState.asStateFlow()
 
     // Generate unique local ID
     val localId: Long = Random.nextLong(1, Long.MAX_VALUE)
@@ -162,55 +186,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Pose broadcast throttling
     private var lastPoseBroadcastMs = 0L
 
-    /** Initialize all managers. Call after permissions are granted. */
+    /** Initialize all managers with default service ID. Call after permissions are granted. */
     fun initialize() {
         if (isInitialized) return
-
-        Log.d(TAG, "Initializing with localId: $localId")
-
-        nearbyManager =
-            NearbyConnectionsManager(
-                context = getApplication(),
-                localId = localId,
-                onMessageReceived = { endpointId, message ->
-                    when (message.getMessageType()) {
-                        MessageType.DATA_TCP, MessageType.DATA_UDP ->
-                            onDataReceived(endpointId, message)
-                        else ->
-                            meshManager.onMessageReceived(endpointId, message)
-                    }
-                }
-            )
-
-        meshManager =
-            MeshManager(
-                localId = localId,
-                nearbyManager = nearbyManager,
-                onBecomeLeader = ::onBecomeLeader,
-                onNewLeader = ::onNewLeader,
-                onPoseUpdate = ::onPoseUpdate
-            )
-
-        // Observe nearby peers
-        viewModelScope.launch { nearbyManager.peers.collect { peers -> _peers.value = peers } }
-
-        // Observe mesh state
-        viewModelScope.launch {
-            meshManager.meshState.collect { state ->
-                _meshState.value = state
-                updateStatusMessage(state)
-            }
-        }
-
-        // Observe leader
-        viewModelScope.launch {
-            meshManager.currentLeaderId.collect { leaderId ->
-                _currentLeaderId.value = leaderId
-                _isLeader.value = leaderId == localId
-            }
-        }
-
-        isInitialized = true
+        initializeWithServiceId(MeshVisualizerApp.SERVICE_ID)
     }
 
     /** Set the ARCore session for local anchor placement. */
@@ -649,6 +628,108 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    // --- Onboarding & Connection Flow ---
+
+    fun completeOnboarding() {
+        viewModelScope.launch { prefsRepo.setOnboardingCompleted(true) }
+    }
+
+    private val groupCodeRegex = Regex("^[A-Za-z0-9-]{2,20}$")
+
+    fun setGroupCode(code: String) {
+        _groupCode.value = code
+        _groupCodeError.value = if (code.isEmpty() || groupCodeRegex.matches(code)) null
+        else "Code must be 2-20 characters (letters, numbers, hyphens)"
+    }
+
+    fun joinGroup() {
+        val code = _groupCode.value
+        if (!groupCodeRegex.matches(code)) return
+
+        _connectionState.value = ConnectionFlowState.JOINING
+        val sanitized = code.uppercase().replace("-", "")
+        val serviceId = MeshVisualizerApp.serviceIdForGroup(sanitized)
+
+        // Save for next time
+        viewModelScope.launch { prefsRepo.setLastGroupCode(code) }
+
+        // Initialize managers with group-specific service ID
+        initializeWithServiceId(serviceId)
+
+        meshManager.startDiscovery()
+        _connectionState.value = ConnectionFlowState.IN_LOBBY
+    }
+
+    fun leaveGroup() {
+        if (isInitialized) {
+            nearbyManager.cleanup()
+            meshManager.cleanup()
+            isInitialized = false
+        }
+        _connectionState.value = ConnectionFlowState.IDLE
+        _peers.value = emptyMap()
+        _meshState.value = MeshState.DISCOVERING
+        _currentLeaderId.value = -1L
+        _isLeader.value = false
+    }
+
+    fun startMeshFromLobby() {
+        _connectionState.value = ConnectionFlowState.STARTING
+        meshManager.startElection()
+    }
+
+    private fun initializeWithServiceId(serviceId: String) {
+        if (isInitialized) {
+            nearbyManager.cleanup()
+            meshManager.cleanup()
+        }
+
+        Log.d(TAG, "Initializing with localId: $localId, serviceId: $serviceId")
+
+        nearbyManager = NearbyConnectionsManager(
+            context = getApplication(),
+            localId = localId,
+            serviceId = serviceId,
+            onMessageReceived = { endpointId, message ->
+                when (message.getMessageType()) {
+                    MessageType.DATA_TCP, MessageType.DATA_UDP ->
+                        onDataReceived(endpointId, message)
+                    else ->
+                        meshManager.onMessageReceived(endpointId, message)
+                }
+            }
+        )
+
+        meshManager = MeshManager(
+            localId = localId,
+            nearbyManager = nearbyManager,
+            onBecomeLeader = ::onBecomeLeader,
+            onNewLeader = ::onNewLeader,
+            onPoseUpdate = ::onPoseUpdate
+        )
+
+        // Observe nearby peers
+        viewModelScope.launch { nearbyManager.peers.collect { peers -> _peers.value = peers } }
+
+        // Observe mesh state
+        viewModelScope.launch {
+            meshManager.meshState.collect { state ->
+                _meshState.value = state
+                updateStatusMessage(state)
+            }
+        }
+
+        // Observe leader
+        viewModelScope.launch {
+            meshManager.currentLeaderId.collect { leaderId ->
+                _currentLeaderId.value = leaderId
+                _isLeader.value = leaderId == localId
+            }
+        }
+
+        isInitialized = true
     }
 
     /** Set parent node for line renderer and packet renderer. */

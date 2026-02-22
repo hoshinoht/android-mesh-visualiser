@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.update
 class NearbyConnectionsManager(
         private val context: Context,
         private val localId: Long,
+        private val serviceId: String = MeshVisualizerApp.SERVICE_ID,
         private val onMessageReceived: (endpointId: String, message: MeshMessage) -> Unit
 ) {
   companion object {
@@ -181,7 +182,7 @@ class NearbyConnectionsManager(
     connectionsClient
             .startAdvertising(
                     localId.toString(),
-                    MeshVisualizerApp.SERVICE_ID,
+                    serviceId,
                     connectionLifecycleCallback,
                     advertisingOptions
             )
@@ -200,7 +201,7 @@ class NearbyConnectionsManager(
 
     connectionsClient
             .startDiscovery(
-                    MeshVisualizerApp.SERVICE_ID,
+                    serviceId,
                     endpointDiscoveryCallback,
                     discoveryOptions
             )

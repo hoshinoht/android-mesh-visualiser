@@ -73,10 +73,15 @@ class MeshManager(
         }
     }
 
-    /** Start mesh formation - begin discovering and wait for peers. */
-    fun startMeshFormation() {
+    /** Start discovery and advertising only — no election timeout. */
+    fun startDiscovery() {
         _meshState.value = MeshState.DISCOVERING
         nearbyManager.startDiscoveryAndAdvertising()
+    }
+
+    /** Start mesh formation - begin discovering and wait for peers, then auto-elect. */
+    fun startMeshFormation() {
+        startDiscovery()
 
         meshFormationTimeoutRunnable = Runnable {
             if (_meshState.value == MeshState.DISCOVERING) {

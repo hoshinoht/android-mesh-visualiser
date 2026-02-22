@@ -15,6 +15,9 @@ class MeshVisualizerApp : Application() {
         
         // Cloud Anchor TTL (in days)
         const val CLOUD_ANCHOR_TTL_DAYS = 1
+
+        /** Build a group-specific service ID so only devices in the same group discover each other. */
+        fun serviceIdForGroup(groupCode: String): String = "$SERVICE_ID.$groupCode"
     }
     
     override fun onCreate() {

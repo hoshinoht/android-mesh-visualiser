@@ -72,6 +72,12 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
 
+    // Navigation
+    implementation("androidx.navigation:navigation-compose:2.8.4")
+
+    // DataStore
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
+
     // JSON serialization
     implementation("com.google.code.gson:gson:2.11.0")
 
